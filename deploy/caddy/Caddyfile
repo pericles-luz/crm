@@ -1,0 +1,30 @@
+# Caddy 2 config — Fase 0 (SIN-62208).
+# Wildcard internal vhost *.crm.local + reverse_proxy to app:8080.
+# Per-tenant routing refinements arrive in PR5.
+
+{
+	# Local-only stack: disable automatic public ACME until staging.
+	auto_https off
+	admin off
+}
+
+# Plain HTTP passthrough for local smoke checks (curl http://localhost:8080/health).
+:8080 {
+	reverse_proxy app:8080
+}
+
+# Wildcard tenant vhost. TLS is auto-managed in stg/prod (PR9 wires the issuer).
+*.crm.local, crm.local {
+	reverse_proxy app:8080
+
+	encode zstd gzip
+
+	header {
+		# Defense-in-depth defaults; tightened in PR6/PR10.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
