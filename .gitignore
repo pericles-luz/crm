@@ -1,0 +1,17 @@
+# Go
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+
+# Local env (NEVER commit)
+deploy/compose/.env
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
