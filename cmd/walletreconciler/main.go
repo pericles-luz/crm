@@ -18,9 +18,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
+	prommetrics "github.com/pericles-luz/crm/internal/wallet/adapter/metrics/prom"
+	"github.com/pericles-luz/crm/internal/wallet/adapter/openrouter"
 	pgrepo "github.com/pericles-luz/crm/internal/wallet/adapter/postgres"
 	"github.com/pericles-luz/crm/internal/wallet/adapter/queue/inmem"
-	prommetrics "github.com/pericles-luz/crm/internal/wallet/adapter/metrics/prom"
 	"github.com/pericles-luz/crm/internal/wallet/port"
 	"github.com/pericles-luz/crm/internal/wallet/usecase"
 )
@@ -47,14 +48,32 @@ func main() {
 	defer pool.Close()
 
 	r := usecase.Reconciliator{
-		Repo:    pgrepo.New(pool),
-		Queue:   inmem.New(0),
-		Metrics: prommetrics.New(prometheus.DefaultRegisterer),
-		Alerter: stderrAlerter{},
-		Clock:   port.SystemClock{},
+		Repo:       pgrepo.New(pool),
+		Queue:      inmem.New(0),
+		Metrics:    prommetrics.New(prometheus.DefaultRegisterer),
+		Alerter:    stderrAlerter{},
+		Clock:      port.SystemClock{},
+		OpenRouter: buildOpenRouter(),
 	}
 	if err := r.RunOnce(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		log.Fatalf("reconciliator: %v", err)
 	}
 	log.Println("walletreconciler: pass complete")
+}
+
+// buildOpenRouter wires the OpenRouter HTTP adapter when
+// OPENROUTER_API_KEY is set; otherwise returns nil so the
+// reconciliator skips the inline drift loop. Optional
+// OPENROUTER_BASE_URL overrides the default host (used for stg).
+func buildOpenRouter() port.OpenRouterCostAPI {
+	key := os.Getenv("OPENROUTER_API_KEY")
+	if key == "" {
+		log.Println("walletreconciler: OPENROUTER_API_KEY not set; OpenRouter drift check disabled")
+		return nil
+	}
+	opts := []openrouter.Option{}
+	if base := os.Getenv("OPENROUTER_BASE_URL"); base != "" {
+		opts = append(opts, openrouter.WithBaseURL(base))
+	}
+	return openrouter.New(key, opts...)
 }
