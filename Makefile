@@ -1,14 +1,15 @@
 # CRM — Fase 0 Makefile (SIN-62208).
-# Targets: up, down, logs, test, lint, migrate-up, migrate-down, seed-stg, smoke-alert.
+# Targets: up, down, logs, test, lint, notenant, migrate-up, migrate-down, seed-stg, smoke-alert.
 
 SHELL := /bin/bash
 COMPOSE_DIR := deploy/compose
 COMPOSE := docker compose --project-directory $(COMPOSE_DIR) -f $(COMPOSE_DIR)/compose.yml
 GO ?= go
+NOTENANT_BIN := $(CURDIR)/bin/notenant
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down logs test lint migrate-up migrate-down seed-stg smoke-alert
+.PHONY: help up down logs test lint notenant migrate-up migrate-down seed-stg smoke-alert
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -29,8 +30,12 @@ logs: ## Tail logs from every service
 test: ## Run Go test suite with coverage
 	$(GO) test ./... -race -count=1 -cover
 
-lint: ## Run go vet (staticcheck wired in PR8)
+lint: notenant ## Run go vet + the notenant analyzer over internal/ (SIN-62232 / ADR 0071)
 	$(GO) vet ./...
+	$(GO) vet -vettool=$(NOTENANT_BIN) ./internal/...
+
+notenant: ## Build the notenant analyzer binary into bin/ (SIN-62232 / ADR 0071)
+	$(GO) build -o $(NOTENANT_BIN) ./tools/lint/notenant/cmd/notenant
 
 migrate-up: ## Apply DB migrations (wired in PR2 with goose)
 	@echo "migrate-up: stub — PR2 (SIN Fase 0) wires goose against postgres service"

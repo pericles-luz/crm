@@ -1,0 +1,81 @@
+# CI for the multi-tenant CRM — SIN-62232.
+#
+# Two jobs: lint (fast, no DB) and test (real Postgres 16). The test job
+# brings up a postgres:16 service container and exposes its DSN as
+# TEST_DATABASE_URL so internal/adapter/db/postgres/testpg attaches to it
+# instead of spawning an ephemeral cluster locally.
+#
+# This is the minimum CI needed to gate the SIN-62232 deliverables; it does
+# not yet include staticcheck (PR8 per the Makefile help) or coverage
+# uploads (those land alongside SIN-62192 Phase 0 Bootstrap).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: build notenant analyzer
+        run: go build -o bin/notenant ./tools/lint/notenant/cmd/notenant
+      - name: notenant analyzer (./internal/...)
+        run: go vet -vettool=$(pwd)/bin/notenant ./internal/...
+      - name: notenant analyzer self-test
+        run: go test ./tools/lint/notenant/... -count=1
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-superuser
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # testpg honours TEST_DATABASE_URL when set; otherwise it spawns its own
+      # cluster via pg_ctl. The keyword DSN format matches what the harness
+      # parses with parseHostPort.
+      TEST_DATABASE_URL: "host=127.0.0.1 port=5432 user=postgres password=ci-superuser dbname=postgres sslmode=disable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test (unit + integration)
+        run: |
+          go test ./... -race -count=1 \
+            -coverpkg=./internal/adapter/db/postgres \
+            -coverprofile=coverage.out
+      - name: enforce >=85% coverage on internal/adapter/db/postgres
+        run: |
+          pct=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$3); print $3}')
+          echo "coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit !(p+0 >= 85.0) }' || {
+            echo "coverage ${pct}% below 85% threshold (SIN-62221 quality bar)"
+            exit 1
+          }

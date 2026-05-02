@@ -103,7 +103,10 @@ func run(pass *analysis.Pass) (any, error) {
 
 func isAllowedPkg(path string) bool {
 	for _, p := range allowedPkgPrefixes {
-		if path == p || strings.HasPrefix(path, p+"/") {
+		// Also allow the external test package (path + "_test"), which is
+		// what `package postgres_test` files compile to. The test code legitimately
+		// connects directly to a pgxpool.Pool to assert RLS posture.
+		if path == p || path == p+"_test" || strings.HasPrefix(path, p+"/") {
 			return true
 		}
 	}
