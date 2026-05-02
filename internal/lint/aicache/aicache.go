@@ -167,18 +167,21 @@ func runWith(cfg Config) func(*analysis.Pass) (interface{}, error) {
 					}
 				}
 			}
-			// A redis-shaped op returns at least one value whose type is
-			// defined in a package matching RedisPkgSubstr (e.g. goredis.StringCmd,
-			// goredis.StatusCmd, goredis.IntCmd, ...). This catches calls
-			// through both *goredis.Client and any Cmdable subset interface.
-			if !returnsRedisType(call, pass.TypesInfo, cfg.RedisPkgSubstr) {
+			// A redis-shaped op returns a single value whose type is defined in
+			// a package matching RedisPkgSubstr (e.g. *goredis.StringCmd,
+			// *goredis.StatusCmd, *goredis.IntCmd). This catches calls through
+			// both *goredis.Client and any Cmdable subset interface.
+			retType := pass.TypesInfo.TypeOf(call)
+			if retType == nil || !isFromPackage(retType, cfg.RedisPkgSubstr) {
 				return
 			}
-			argIdx := keyArgIndex(call, pass.TypesInfo)
-			if argIdx < 0 || argIdx >= len(call.Args) {
+			// Watched methods follow the convention Method(ctx, key, ...). We
+			// only police the first key argument; the adapter never passes
+			// more than one and the rest are non-key (values, ttl, etc.).
+			if len(call.Args) < 2 {
 				return
 			}
-			arg := call.Args[argIdx]
+			arg := call.Args[1]
 			if isCacheKeyStringCall(arg, pass.TypesInfo, cfg.CachePkgSubstr) {
 				return
 			}
@@ -192,26 +195,9 @@ func runWith(cfg Config) func(*analysis.Pass) (interface{}, error) {
 	}
 }
 
-// returnsRedisType reports whether the call's return signature includes a
-// value whose named type lives in a package whose path contains pkgSubstr.
-func returnsRedisType(call *ast.CallExpr, info *types.Info, pkgSubstr string) bool {
-	t := info.TypeOf(call)
-	if t == nil {
-		return false
-	}
-	switch tt := t.(type) {
-	case *types.Tuple:
-		for i := 0; i < tt.Len(); i++ {
-			if isFromPackage(tt.At(i).Type(), pkgSubstr) {
-				return true
-			}
-		}
-		return false
-	default:
-		return isFromPackage(t, pkgSubstr)
-	}
-}
-
+// isFromPackage reports whether t is a (pointer to a) named type defined in a
+// package whose import path contains pkgSubstr. Used to recognise both the
+// redis client/cmd types (e.g. *goredis.StringCmd) and the cache.Key receiver.
 func isFromPackage(t types.Type, pkgSubstr string) bool {
 	for {
 		switch tt := t.(type) {
@@ -227,30 +213,6 @@ func isFromPackage(t types.Type, pkgSubstr string) bool {
 			return false
 		}
 	}
-}
-
-// keyArgIndex returns the index of the key argument in the call. It is the
-// first argument whose type is string (or whose type is a string-defined
-// alias). For watched methods this is conventionally the first argument
-// after context.Context.
-func keyArgIndex(call *ast.CallExpr, info *types.Info) int {
-	for i, arg := range call.Args {
-		t := info.TypeOf(arg)
-		if t == nil {
-			continue
-		}
-		if isStringLike(t) {
-			return i
-		}
-	}
-	return -1
-}
-
-func isStringLike(t types.Type) bool {
-	if b, ok := t.Underlying().(*types.Basic); ok {
-		return b.Kind() == types.String || b.Kind() == types.UntypedString
-	}
-	return false
 }
 
 // isCacheKeyStringCall reports whether expr is a method-call expression of the
