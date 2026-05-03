@@ -4,22 +4,35 @@
 -- altered or dropped. Rollback is `DROP TABLE token_ledger; DROP TABLE
 -- token_wallets;` once Fase 1 (SIN-62193) is rolled back too.
 --
--- Concurrency contract:
---   - token_wallets.balance_movement is the source of truth for "tokens left".
---   - Reserve takes SELECT ... FOR UPDATE on token_wallets and inserts a
---     row in token_ledger with status='pending' (NO change to balance_movement).
---   - Commit takes SELECT ... FOR UPDATE on the wallet row, flips the
---     pending entry to 'posted', and applies its signed amount.
---   - Cancel flips pending → cancelled (no balance change).
+-- Concurrency contract (F30 atomic reserve):
+--   - token_wallets.balance_movement is the source of truth for "tokens
+--     left right now" — a debit reduces it the moment Reserve runs,
+--     before the LLM call, so two concurrent Reserves cannot both see
+--     enough balance and oversubscribe.
+--   - Reserve takes SELECT ... FOR UPDATE on the wallet row, validates
+--     balance_movement >= amount, then debits balance_movement (adds the
+--     entry's signed amount) and inserts a token_ledger row with
+--     status='pending'. Reserve owns the balance change.
+--   - Commit flips the pending entry to 'posted' (status-only) and bumps
+--     wallet.version. NO change to balance_movement — Reserve already
+--     applied it. This is what makes the F37 retry loop safe.
+--   - Cancel flips pending → cancelled and restores the reserved tokens
+--     to balance_movement (reverses the Reserve mutation).
 --   - We never DELETE from token_ledger; reconciliation creates entries
 --     with source='reconciliation'.
+--   - Defense in depth: the balance_movement >= 0 CHECK is the DB-level
+--     invariant that backs up the application's atomic-reserve guard.
 
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS token_wallets (
     id                 UUID PRIMARY KEY,
     master_id          UUID NOT NULL,
-    balance_movement   BIGINT NOT NULL DEFAULT 0,
+    -- Defense in depth: balance_movement >= 0 is the DB-level invariant
+    -- backing the application's atomic-reserve guard. If a code path
+    -- ever tries to drain the wallet past zero, this CHECK is the
+    -- safety net.
+    balance_movement   BIGINT NOT NULL DEFAULT 0 CHECK (balance_movement >= 0),
     version            BIGINT NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()

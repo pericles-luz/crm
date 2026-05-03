@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,17 +78,19 @@ func TestReserveCommitCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get wallet: %v", err)
 	}
-	if w.BalanceMovement != 1000 {
-		t.Fatalf("reserve must NOT change balance_movement, got %d", w.BalanceMovement)
+	// F30 contract: Reserve atomically debits balance_movement.
+	if w.BalanceMovement != 900 {
+		t.Fatalf("F30 atomic reserve must subtract amount; got balance %d, want 900", w.BalanceMovement)
 	}
 
-	// Commit.
+	// Commit is a status flip only; balance is unchanged because Reserve
+	// already debited it.
 	if err := r.Commit(ctx, persisted.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	w, _ = r.GetWallet(ctx, walletID)
 	if w.BalanceMovement != 900 {
-		t.Fatalf("commit must apply debit; got balance %d, want 900", w.BalanceMovement)
+		t.Fatalf("commit must NOT change balance_movement; got %d, want 900", w.BalanceMovement)
 	}
 
 	// Re-commit must be terminal.
@@ -96,7 +99,8 @@ func TestReserveCommitCancel(t *testing.T) {
 		t.Fatalf("double commit: want ErrEntryAlreadyResolved, got %v", err)
 	}
 
-	// Reserve + cancel.
+	// Reserve + cancel — Reserve debits 50, Cancel restores 50, so the
+	// wallet should be back at 900.
 	pending, err := r.Reserve(ctx, walletID, wallet.LedgerEntry{
 		WalletID:  walletID,
 		Kind:      wallet.KindDebit,
@@ -107,12 +111,16 @@ func TestReserveCommitCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve 2: %v", err)
 	}
+	w, _ = r.GetWallet(ctx, walletID)
+	if w.BalanceMovement != 850 {
+		t.Fatalf("reserve 2 must subtract amount; got %d, want 850", w.BalanceMovement)
+	}
 	if err := r.Cancel(ctx, pending.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	w, _ = r.GetWallet(ctx, walletID)
 	if w.BalanceMovement != 900 {
-		t.Fatalf("cancel must NOT change balance; got %d", w.BalanceMovement)
+		t.Fatalf("cancel must restore reserved tokens; got %d, want 900", w.BalanceMovement)
 	}
 
 	// Drift sum + count.
@@ -152,5 +160,75 @@ func TestReserveInsufficientFunds(t *testing.T) {
 	})
 	if !errors.Is(err, wallet.ErrInsufficientFunds) {
 		t.Fatalf("want ErrInsufficientFunds, got %v", err)
+	}
+}
+
+// TestReserveAtomicVsRace_Postgres is the production-side counterpart to
+// memrepo's TestRepo_ReserveAtomicVsRace. With balance=100 and N=8
+// goroutines each reserving 50, the F30 atomic-reserve contract requires
+// exactly 2 successes and 6 ErrInsufficientFunds — proving that
+// SELECT FOR UPDATE + balance_movement decrement inside the same TX
+// serialises concurrent reservations against the real database.
+func TestReserveAtomicVsRace_Postgres(t *testing.T) {
+	pool := connect(t)
+	truncate(t, pool)
+	r := pgrepo.New(pool)
+	ctx := context.Background()
+
+	walletID := uuid.NewString()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO token_wallets (id, master_id, balance_movement) VALUES ($1, $2, 100)`,
+		walletID, uuid.NewString(),
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const goroutines = 8
+	const amount = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	results := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := r.Reserve(ctx, walletID, wallet.LedgerEntry{
+				WalletID:  walletID,
+				Kind:      wallet.KindDebit,
+				Source:    wallet.SourceLLMCall,
+				Amount:    amount,
+				CreatedAt: time.Now().UTC(),
+			})
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	insuf := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, wallet.ErrInsufficientFunds):
+			insuf++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 2 {
+		t.Errorf("F30 race: successful reserves = %d, want 2", successes)
+	}
+	if insuf != goroutines-2 {
+		t.Errorf("F30 race: insufficient = %d, want %d", insuf, goroutines-2)
+	}
+
+	// Final balance must be exactly 0 — two debits of 50 against 100.
+	w, err := r.GetWallet(ctx, walletID)
+	if err != nil {
+		t.Fatalf("get wallet: %v", err)
+	}
+	if w.BalanceMovement != 0 {
+		t.Fatalf("F30 race: post-race balance = %d, want 0", w.BalanceMovement)
 	}
 }

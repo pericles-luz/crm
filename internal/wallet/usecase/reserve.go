@@ -16,12 +16,15 @@ import (
 // Reserve does the following under a single repository transaction:
 //   1. SELECT FOR UPDATE on the wallet row.
 //   2. Validate balance_movement >= amount for debit.
-//   3. Insert a pending ledger entry.
-//   4. Commit the transaction.
+//   3. Atomically subtract the entry's signed amount from
+//      balance_movement (this is the F30 atomic-reserve step that
+//      prevents concurrent oversubscription).
+//   4. Insert a pending ledger entry.
+//   5. Commit the transaction.
 //
 // The returned LedgerEntry holds the reservation id; callers pass that
 // id to CommitDebit after the LLM call returns OK, or to CancelDebit on
-// rollback.
+// rollback. Cancel restores the reserved tokens to balance_movement.
 type Reserve struct {
 	Repo  port.Repository
 	IDs   port.IDGenerator

@@ -46,7 +46,15 @@ func (r *Repo) withTx(ctx context.Context, level pgx.TxIsoLevel, fn func(pgx.Tx)
 	return tx.Commit(ctx)
 }
 
-// Reserve implements port.Repository under SELECT ... FOR UPDATE.
+// Reserve implements port.Repository — F30 atomic reservation.
+//
+// Under SELECT ... FOR UPDATE on the wallet row, Reserve checks funds,
+// inserts the pending ledger entry, and atomically applies the entry's
+// signed amount to balance_movement inside the same TX. The balance
+// write happens BEFORE the LLM call returns, which is the F30 invariant:
+// two concurrent Reserves serialise on the row lock, the second sees
+// the already-debited balance_movement, and the funds check correctly
+// rejects an oversubscription. Production parity with memrepo.
 func (r *Repo) Reserve(ctx context.Context, walletID string, entry wallet.LedgerEntry) (wallet.LedgerEntry, error) {
 	if entry.ID == "" {
 		entry.ID = uuid.NewString()
@@ -74,12 +82,14 @@ func (r *Repo) Reserve(ctx context.Context, walletID string, entry wallet.Ledger
 		if err != nil {
 			return fmt.Errorf("postgres: insert ledger: %w", err)
 		}
-		_, err = tx.Exec(ctx,
-			`UPDATE token_wallets SET version = version + 1, updated_at = NOW() WHERE id = $1`,
-			walletID,
-		)
-		if err != nil {
-			return fmt.Errorf("postgres: bump wallet version: %w", err)
+		// signed is positive for credit, negative for debit; adding it
+		// to balance_movement applies the reservation directionally.
+		signed := entry.SignedAmount()
+		if _, err := tx.Exec(ctx,
+			`UPDATE token_wallets SET balance_movement = balance_movement + $1, version = version + 1, updated_at = NOW() WHERE id = $2`,
+			signed, walletID,
+		); err != nil {
+			return fmt.Errorf("postgres: apply reserve: %w", err)
 		}
 		entry.Status = wallet.StatusPending
 		out = entry
@@ -91,8 +101,59 @@ func (r *Repo) Reserve(ctx context.Context, walletID string, entry wallet.Ledger
 	return out, nil
 }
 
-// Commit implements port.Repository.
+// Commit implements port.Repository — pending → posted with no balance
+// change. Reserve already debited balance_movement; Commit only flips
+// status and bumps the wallet version. This is what makes the F37 retry
+// loop safe: a second Commit on the same entry is a terminal
+// ErrEntryAlreadyResolved, never a double-debit.
 func (r *Repo) Commit(ctx context.Context, entryID string, postedAt time.Time) error {
+	return r.withTx(ctx, pgx.ReadCommitted, func(tx pgx.Tx) error {
+		var (
+			walletID string
+			status   string
+		)
+		err := tx.QueryRow(ctx,
+			`SELECT wallet_id, status FROM token_ledger WHERE id = $1 FOR UPDATE`,
+			entryID,
+		).Scan(&walletID, &status)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return wallet.ErrEntryNotFound
+			}
+			return fmt.Errorf("postgres: select ledger: %w", err)
+		}
+		if status != string(wallet.StatusPending) {
+			return wallet.ErrEntryAlreadyResolved
+		}
+		// Lock the wallet row so the version bump serialises with
+		// concurrent Reserve/Cancel on the same wallet.
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM token_wallets WHERE id = $1 FOR UPDATE`,
+			walletID,
+		); err != nil {
+			return fmt.Errorf("postgres: lock wallet: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE token_ledger SET status = 'posted', posted_at = $1 WHERE id = $2`,
+			postedAt, entryID,
+		); err != nil {
+			return fmt.Errorf("postgres: post ledger: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE token_wallets SET version = version + 1, updated_at = $1 WHERE id = $2`,
+			postedAt, walletID,
+		); err != nil {
+			return fmt.Errorf("postgres: bump wallet version: %w", err)
+		}
+		return nil
+	})
+}
+
+// Cancel implements port.Repository — pending → cancelled and restores
+// the reserved tokens to balance_movement so the rollback fully reverses
+// the Reserve mutation. Wallet row is locked first so the restore
+// composes atomically with concurrent Reserve attempts.
+func (r *Repo) Cancel(ctx context.Context, entryID string, cancelledAt time.Time) error {
 	return r.withTx(ctx, pgx.ReadCommitted, func(tx pgx.Tx) error {
 		var (
 			walletID string
@@ -113,44 +174,29 @@ func (r *Repo) Commit(ctx context.Context, entryID string, postedAt time.Time) e
 		if status != string(wallet.StatusPending) {
 			return wallet.ErrEntryAlreadyResolved
 		}
-		signed := amount
-		if kind == string(wallet.KindDebit) {
-			signed = -amount
+		// Reverse the Reserve mutation: for a debit, add `amount` back;
+		// for a credit reservation, subtract it.
+		restore := amount
+		if kind == string(wallet.KindCredit) {
+			restore = -amount
+		}
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM token_wallets WHERE id = $1 FOR UPDATE`,
+			walletID,
+		); err != nil {
+			return fmt.Errorf("postgres: lock wallet: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE token_ledger SET status = 'cancelled', cancelled_at = $1 WHERE id = $2`,
+			cancelledAt, entryID,
+		); err != nil {
+			return fmt.Errorf("postgres: cancel ledger: %w", err)
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE token_wallets SET balance_movement = balance_movement + $1, version = version + 1, updated_at = $2 WHERE id = $3`,
-			signed, postedAt, walletID,
+			restore, cancelledAt, walletID,
 		); err != nil {
-			return fmt.Errorf("postgres: apply balance: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE token_ledger SET status = 'posted', posted_at = $1 WHERE id = $2`,
-			postedAt, entryID,
-		); err != nil {
-			return fmt.Errorf("postgres: post ledger: %w", err)
-		}
-		return nil
-	})
-}
-
-// Cancel implements port.Repository.
-func (r *Repo) Cancel(ctx context.Context, entryID string, cancelledAt time.Time) error {
-	return r.withTx(ctx, pgx.ReadCommitted, func(tx pgx.Tx) error {
-		ct, err := tx.Exec(ctx,
-			`UPDATE token_ledger SET status = 'cancelled', cancelled_at = $1 WHERE id = $2 AND status = 'pending'`,
-			cancelledAt, entryID,
-		)
-		if err != nil {
-			return fmt.Errorf("postgres: cancel ledger: %w", err)
-		}
-		if ct.RowsAffected() == 0 {
-			// Distinguish missing vs already resolved.
-			var status string
-			scanErr := tx.QueryRow(ctx, `SELECT status FROM token_ledger WHERE id = $1`, entryID).Scan(&status)
-			if scanErr != nil {
-				return wallet.ErrEntryNotFound
-			}
-			return wallet.ErrEntryAlreadyResolved
+			return fmt.Errorf("postgres: restore balance: %w", err)
 		}
 		return nil
 	})
