@@ -1,0 +1,54 @@
+/* upload.css — minimal styles for SIN-62258 upload forms.
+   Kept tiny on purpose: end-product styling will be set by the host page;
+   here we only ensure the error/progress regions are visible and the
+   preview canvas has a sane bounding box. */
+
+.sin-upload-form {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 32rem;
+  font-family: system-ui, sans-serif;
+}
+
+.sin-upload-form label {
+  font-weight: 600;
+}
+
+.sin-upload-form .sin-upload-error {
+  color: #b00020;
+  font-weight: 600;
+  padding: 0.5rem;
+  border: 1px solid #b00020;
+  border-radius: 0.25rem;
+  background: #fff5f7;
+}
+
+.sin-upload-form .sin-upload-error[hidden] {
+  display: none;
+}
+
+.sin-upload-form .sin-upload-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sin-upload-form .sin-upload-progress[hidden] {
+  display: none;
+}
+
+.sin-upload-form progress {
+  flex: 1;
+  height: 1rem;
+}
+
+.sin-upload-form canvas[data-upload-preview] {
+  border: 1px solid #ccc;
+  background: #f7f7f7;
+  max-width: 240px;
+  max-height: 240px;
+}
+
+.sin-upload-form canvas[data-upload-preview][hidden] {
+  display: none;
+}

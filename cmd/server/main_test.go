@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -132,4 +134,148 @@ func waitForListening(t *testing.T, addr string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("server did not listen on %s", addr)
+}
+
+// --- SIN-62258 upload UI route tests -----------------------------------
+
+func TestNewMux_RoutesLogoUploadForm(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/uploads/logo", nil)
+	newMux().ServeHTTP(rec, req)
+
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	if got := res.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/html; charset=utf-8", got)
+	}
+	if got := res.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := res.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	got := string(body)
+	for _, want := range []string{
+		`data-upload="logo"`,
+		`accept="image/png,image/jpeg,image/webp"`,
+		`Logo da empresa`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("logo form response missing %q", want)
+		}
+	}
+}
+
+func TestNewMux_AttachmentForm404WhenFlagOff(t *testing.T) {
+	t.Setenv("SIN_UPLOAD_ATTACHMENT_FORM", "")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/uploads/attachment", nil)
+	newMux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (flag off)", rec.Code)
+	}
+}
+
+func TestNewMux_AttachmentForm200WhenFlagOn(t *testing.T) {
+	t.Setenv("SIN_UPLOAD_ATTACHMENT_FORM", "1")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/uploads/attachment", nil)
+	newMux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (flag on)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `data-upload="attachment"`) {
+		t.Errorf("attachment form response missing data-upload marker")
+	}
+	if !strings.Contains(body, "Anexo (PNG, JPG, WEBP ou PDF)") {
+		t.Errorf("attachment form response missing PT-BR label")
+	}
+}
+
+func TestNewMux_AttachmentForm_FlagAcceptsTrueLiteral(t *testing.T) {
+	t.Setenv("SIN_UPLOAD_ATTACHMENT_FORM", "true")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/uploads/attachment", nil)
+	newMux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for SIN_UPLOAD_ATTACHMENT_FORM=true", rec.Code)
+	}
+}
+
+func TestNewMux_LogoFormRejectsPOSTWithAllowHeader(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/uploads/logo", nil)
+	newMux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Errorf("Allow = %q, want GET", got)
+	}
+}
+
+func TestNewMux_StaticUploadJS(t *testing.T) {
+	srv := httptest.NewServer(newMux())
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/static/upload/upload.js")
+	if err != nil {
+		t.Fatalf("GET upload.js: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(body), "SIN-62258") {
+		t.Errorf("upload.js missing SIN-62258 marker — wrong file served? got %d bytes", len(body))
+	}
+}
+
+func TestNewMux_StaticUploadCSS(t *testing.T) {
+	srv := httptest.NewServer(newMux())
+	defer srv.Close()
+	res, err := http.Get(srv.URL + "/static/upload/upload.css")
+	if err != nil {
+		t.Fatalf("GET upload.css: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+}
+
+func TestUploadAttachmentFormEnabled(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"FALSE", false},
+		{"1", true},
+		{"true", true},
+		{"True", true},
+		{"  true  ", true},
+	}
+	for _, c := range cases {
+		t.Run(c.val, func(t *testing.T) {
+			t.Setenv("SIN_UPLOAD_ATTACHMENT_FORM", c.val)
+			if got := uploadAttachmentFormEnabled(); got != c.want {
+				t.Errorf("env=%q got %v, want %v", c.val, got, c.want)
+			}
+		})
+	}
 }

@@ -1,0 +1,107 @@
+{{define "logoForm" -}}
+<form
+  class="sin-upload-form"
+  data-upload="logo"
+  data-upload-allowed="png,jpeg,webp"
+  data-upload-max-bytes="{{.MaxBytes}}"
+  hx-post="{{.Action}}"
+  hx-encoding="multipart/form-data"
+  hx-target="{{.Target}}"
+  hx-swap="innerHTML"
+  enctype="multipart/form-data"
+  method="post"
+  action="{{.Action}}"
+  aria-describedby="{{.ID}}-error"
+  novalidate
+>
+  {{- if and .CSRFFieldName .CSRFToken }}
+  <input type="hidden" name="{{.CSRFFieldName}}" value="{{.CSRFToken}}" />
+  {{- end }}
+  <label for="{{.ID}}-input">{{.Label}}</label>
+  <input
+    id="{{.ID}}-input"
+    type="file"
+    name="file"
+    accept="image/png,image/jpeg,image/webp"
+    aria-describedby="{{.ID}}-help {{.ID}}-error"
+    required
+  />
+  <small id="{{.ID}}-help">
+    Formatos aceitos: PNG, JPG, WEBP. Tamanho máximo: {{.MaxBytesHuman}}.
+  </small>
+  <canvas
+    data-upload-preview
+    width="240"
+    height="240"
+    aria-label="Pré-visualização da imagem"
+    hidden
+  ></canvas>
+  <div class="sin-upload-progress" data-upload-progress hidden>
+    <progress data-upload-bar max="100" value="0" aria-label="Progresso do upload"></progress>
+    <button type="button" data-upload-cancel aria-label="Cancelar upload">Cancelar</button>
+  </div>
+  <div
+    class="sin-upload-error"
+    id="{{.ID}}-error"
+    role="status"
+    aria-live="polite"
+    data-upload-error
+    hidden
+  ></div>
+  <button type="submit">Enviar logo</button>
+</form>
+{{- end}}
+
+{{define "attachmentForm" -}}
+<form
+  class="sin-upload-form"
+  data-upload="attachment"
+  data-upload-allowed="png,jpeg,webp,pdf"
+  data-upload-max-bytes="{{.MaxBytes}}"
+  hx-post="{{.Action}}"
+  hx-encoding="multipart/form-data"
+  hx-target="{{.Target}}"
+  hx-swap="innerHTML"
+  enctype="multipart/form-data"
+  method="post"
+  action="{{.Action}}"
+  aria-describedby="{{.ID}}-error"
+  novalidate
+>
+  {{- if and .CSRFFieldName .CSRFToken }}
+  <input type="hidden" name="{{.CSRFFieldName}}" value="{{.CSRFToken}}" />
+  {{- end }}
+  <label for="{{.ID}}-input">{{.Label}}</label>
+  <input
+    id="{{.ID}}-input"
+    type="file"
+    name="file"
+    accept="image/png,image/jpeg,image/webp,application/pdf"
+    aria-describedby="{{.ID}}-help {{.ID}}-error"
+    required
+  />
+  <small id="{{.ID}}-help">
+    Formatos aceitos: PNG, JPG, WEBP, PDF. Tamanho máximo: {{.MaxBytesHuman}}.
+  </small>
+  <canvas
+    data-upload-preview
+    width="240"
+    height="240"
+    aria-label="Pré-visualização do anexo"
+    hidden
+  ></canvas>
+  <div class="sin-upload-progress" data-upload-progress hidden>
+    <progress data-upload-bar max="100" value="0" aria-label="Progresso do upload"></progress>
+    <button type="button" data-upload-cancel aria-label="Cancelar upload">Cancelar</button>
+  </div>
+  <div
+    class="sin-upload-error"
+    id="{{.ID}}-error"
+    role="status"
+    aria-live="polite"
+    data-upload-error
+    hidden
+  ></div>
+  <button type="submit">Enviar anexo</button>
+</form>
+{{- end}}
