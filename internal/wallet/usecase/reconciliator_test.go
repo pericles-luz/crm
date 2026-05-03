@@ -76,6 +76,50 @@ func TestReconciliator_NoDriftQuiet(t *testing.T) {
 	}
 }
 
+// TestReconciliator_NoDriftWithNonZeroInitialBalance is the regression
+// test that catches Blocker 2: a wallet hydrated with a non-zero
+// InitialBalance going through Reserve+Commit must produce zero drift.
+// memrepo.SeedWallet defaults InitialBalance to BalanceMovement, mirroring
+// the schema's genesis-grant convention; if the postgres adapter ever
+// stops loading initial_balance again, RunOnce fires drift on every
+// healthy wallet — exactly the production failure the CTO flagged.
+func TestReconciliator_NoDriftWithNonZeroInitialBalance(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 5, 1, 23, 0, 0, 0, time.UTC))
+	repo := memrepo.New()
+	repo.Now = clock.Now
+	repo.SeedWallet(wallet.Wallet{ID: "w1", MasterID: "m1", InitialBalance: 1000, BalanceMovement: 1000})
+
+	entryID := reserveTokens(t, repo, clock, "w1", 100)
+	if err := repo.Commit(context.Background(), entryID, clock.Now()); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+
+	alerter := &recAlerter{}
+	metrics := noop.New()
+	r := usecase.Reconciliator{
+		Repo: repo, Queue: inmem.New(0), Metrics: metrics, Alerter: alerter, Clock: clock,
+		DriftAlertPct: 0.01,
+	}
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("reconciliator: %v", err)
+	}
+	for _, a := range alerter.Snapshot() {
+		if a.Code == "wallet.reconciliation_drift" {
+			t.Fatalf("non-zero initial_balance steady-state must not alert; got %+v", a)
+		}
+	}
+	if got := metrics.Snapshot().DriftByWallet["w1"]; got != 0 {
+		t.Fatalf("drift gauge with InitialBalance=1000: got %.4f, want 0", got)
+	}
+	w, err := repo.GetWallet(context.Background(), "w1")
+	if err != nil {
+		t.Fatalf("get wallet: %v", err)
+	}
+	if w.InitialBalance != 1000 {
+		t.Fatalf("InitialBalance not preserved by repo: got %d, want 1000", w.InitialBalance)
+	}
+}
+
 // TestReconciliator_RescuesStuckPending exercises AC #7 "Worker crash
 // injetado entre LLM-OK e commit → entry permanece pending →
 // reconciliação noturna ... balance final correto".

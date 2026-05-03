@@ -202,13 +202,15 @@ func (r *Repo) Cancel(ctx context.Context, entryID string, cancelledAt time.Time
 	})
 }
 
-// GetWallet implements port.Repository.
+// GetWallet implements port.Repository. initial_balance is hydrated so
+// the reconciliator's drift formula has a non-zero denominator on
+// healthy wallets — see migrations/0002_wallet.sql for the invariant.
 func (r *Repo) GetWallet(ctx context.Context, walletID string) (wallet.Wallet, error) {
 	var w wallet.Wallet
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, master_id, balance_movement, version, created_at, updated_at
+		`SELECT id, master_id, initial_balance, balance_movement, version, created_at, updated_at
 		 FROM token_wallets WHERE id = $1`, walletID,
-	).Scan(&w.ID, &w.MasterID, &w.BalanceMovement, &w.Version, &w.CreatedAt, &w.UpdatedAt)
+	).Scan(&w.ID, &w.MasterID, &w.InitialBalance, &w.BalanceMovement, &w.Version, &w.CreatedAt, &w.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return wallet.Wallet{}, wallet.ErrWalletNotFound
@@ -246,10 +248,13 @@ func (r *Repo) GetEntry(ctx context.Context, entryID string) (wallet.LedgerEntry
 	return e, nil
 }
 
-// ListWallets implements port.Repository.
+// ListWallets implements port.Repository. initial_balance is hydrated
+// so the reconciliator's nightly pass folds in the genesis grant (see
+// usecase.Reconciliator.RunOnce drift formula).
 func (r *Repo) ListWallets(ctx context.Context) ([]wallet.Wallet, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, master_id, balance_movement, version, created_at, updated_at FROM token_wallets ORDER BY id`,
+		`SELECT id, master_id, initial_balance, balance_movement, version, created_at, updated_at
+		   FROM token_wallets ORDER BY id`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list wallets: %w", err)
@@ -258,7 +263,7 @@ func (r *Repo) ListWallets(ctx context.Context) ([]wallet.Wallet, error) {
 	out := make([]wallet.Wallet, 0)
 	for rows.Next() {
 		var w wallet.Wallet
-		if err := rows.Scan(&w.ID, &w.MasterID, &w.BalanceMovement, &w.Version, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.MasterID, &w.InitialBalance, &w.BalanceMovement, &w.Version, &w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, w)

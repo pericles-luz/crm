@@ -11,8 +11,13 @@ import (
 )
 
 // DefaultCommitBackoffs is the exponential backoff schedule mandated by
-// AC #2: 200ms, 800ms, 3.2s. The number of entries (3) determines the
-// max number of attempts.
+// AC #2 of SIN-62240: 200ms, 800ms, 3.2s.
+//
+// AC #2 reads "commit_debit tenta 3x com backoff exponencial …". Read
+// that as "three retries between four total attempts": the initial
+// attempt fires immediately, then the three Backoffs precede attempts
+// 2, 3 and 4. Total attempts therefore equal 1 + len(DefaultCommitBackoffs)
+// = 4 and the combined window is roughly 200ms + 800ms + 3200ms = 4.2s.
 var DefaultCommitBackoffs = []time.Duration{
 	200 * time.Millisecond,
 	800 * time.Millisecond,

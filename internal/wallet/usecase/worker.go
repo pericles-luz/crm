@@ -20,25 +20,29 @@ var DefaultWorkerBackoffs = []time.Duration{
 	30 * time.Second,
 }
 
-// DefaultWorkerEscalateAfter is the attempt count above which the
-// worker emits a wallet.commit_persistent_failure alert.
+// DefaultWorkerEscalateAfter is the worker-side attempt count above
+// which the worker emits a wallet.commit_persistent_failure alert. The
+// counter is local to a single dequeued job: escalation is NOT gated on
+// the cumulative job.Attempts, because that would let a job arriving
+// already at-or-above the threshold alert before the worker ever
+// retried (reviewer smaller-finding 2 on SIN-62240).
 const DefaultWorkerEscalateAfter = 5
 
 // ReconcileWorker drains the wallet.reconcile_pending queue and tries
-// to commit each pending entry, escalating to the alerter after a
-// threshold of total attempts.
+// to commit each pending entry, escalating to the alerter after
+// EscalateAfter worker-side attempts on the same job have failed.
 //
 // One worker instance owns one consumer goroutine. The Run method
 // blocks until ctx is cancelled or the queue returns a non-cancellation
 // error.
 type ReconcileWorker struct {
-	Repo            port.Repository
-	Queue           port.ReconcileQueue
-	Metrics         port.Metrics
-	Alerter         port.Alerter
-	Clock           port.Clock
-	Backoffs        []time.Duration // attempt N waits Backoffs[N-1] before retry
-	EscalateAfter   int             // attempts >= this trigger alert (0 → DefaultWorkerEscalateAfter)
+	Repo          port.Repository
+	Queue         port.ReconcileQueue
+	Metrics       port.Metrics
+	Alerter       port.Alerter
+	Clock         port.Clock
+	Backoffs      []time.Duration // attempt N waits Backoffs[N-1] before retry
+	EscalateAfter int             // worker-side attempts before alert (0 → DefaultWorkerEscalateAfter)
 }
 
 // Run blocks consuming jobs until ctx is done.
@@ -67,13 +71,20 @@ func (w ReconcileWorker) handle(ctx context.Context, job port.ReconcileJob) {
 		escalateAfter = DefaultWorkerEscalateAfter
 	}
 
-	attempts := job.Attempts
+	// workerAttempts counts how many times THIS worker invocation has
+	// tried Commit on this job. It starts at 0 and is independent of
+	// the cumulative job.Attempts — see DefaultWorkerEscalateAfter.
+	// totalAttempts is the audit counter (cumulative inline + worker)
+	// reported in alerts and persisted via IncrementAttempts.
+	workerAttempts := 0
+	totalAttempts := job.Attempts
 	for i := 0; i < len(backoffs); i++ {
 		if ctx.Err() != nil {
 			return
 		}
 		err := w.Repo.Commit(ctx, job.EntryID, w.Clock.Now())
-		attempts++
+		workerAttempts++
+		totalAttempts++
 		if err == nil {
 			w.Metrics.IncCommitRetry(port.OutcomeSuccess)
 			return
@@ -87,15 +98,19 @@ func (w ReconcileWorker) handle(ctx context.Context, job port.ReconcileJob) {
 		w.Metrics.IncCommitRetry(port.OutcomeRetry)
 		_ = w.Repo.IncrementAttempts(ctx, job.EntryID)
 
-		if attempts >= escalateAfter {
+		// Escalate strictly on worker-side attempts so a job that
+		// arrives already over the inline-retry threshold still gets
+		// a real retry budget here.
+		if workerAttempts >= escalateAfter {
 			_ = w.Alerter.Send(ctx, port.Alert{
 				Code:    "wallet.commit_persistent_failure",
 				Subject: "Wallet commit retry threshold exceeded",
-				Detail:  fmt.Sprintf("entry %s on wallet %s has %d failed attempts", job.EntryID, job.WalletID, attempts),
+				Detail:  fmt.Sprintf("entry %s on wallet %s — %d worker attempts (total %d)", job.EntryID, job.WalletID, workerAttempts, totalAttempts),
 				Fields: map[string]string{
-					"entry_id":  job.EntryID,
-					"wallet_id": job.WalletID,
-					"attempts":  fmt.Sprintf("%d", attempts),
+					"entry_id":        job.EntryID,
+					"wallet_id":       job.WalletID,
+					"attempts":        fmt.Sprintf("%d", totalAttempts),
+					"worker_attempts": fmt.Sprintf("%d", workerAttempts),
 				},
 			})
 			w.Metrics.IncCommitRetry(port.OutcomeExhausted)

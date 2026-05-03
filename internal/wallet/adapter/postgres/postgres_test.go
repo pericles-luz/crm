@@ -57,7 +57,7 @@ func TestReserveCommitCancel(t *testing.T) {
 	walletID := uuid.NewString()
 	masterID := uuid.NewString()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO token_wallets (id, master_id, balance_movement) VALUES ($1, $2, 1000)`,
+		`INSERT INTO token_wallets (id, master_id, initial_balance, balance_movement) VALUES ($1, $2, 1000, 1000)`,
 		walletID, masterID,
 	); err != nil {
 		t.Fatalf("seed wallet: %v", err)
@@ -146,7 +146,7 @@ func TestReserveInsufficientFunds(t *testing.T) {
 
 	walletID := uuid.NewString()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO token_wallets (id, master_id, balance_movement) VALUES ($1, $2, 50)`,
+		`INSERT INTO token_wallets (id, master_id, initial_balance, balance_movement) VALUES ($1, $2, 50, 50)`,
 		walletID, uuid.NewString(),
 	); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -177,7 +177,7 @@ func TestReserveAtomicVsRace_Postgres(t *testing.T) {
 
 	walletID := uuid.NewString()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO token_wallets (id, master_id, balance_movement) VALUES ($1, $2, 100)`,
+		`INSERT INTO token_wallets (id, master_id, initial_balance, balance_movement) VALUES ($1, $2, 100, 100)`,
 		walletID, uuid.NewString(),
 	); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -230,5 +230,86 @@ func TestReserveAtomicVsRace_Postgres(t *testing.T) {
 	}
 	if w.BalanceMovement != 0 {
 		t.Fatalf("F30 race: post-race balance = %d, want 0", w.BalanceMovement)
+	}
+}
+
+// TestWalletInitialBalanceLoaded is the Blocker 2 regression test:
+// GetWallet and ListWallets must hydrate Wallet.InitialBalance from the
+// schema, otherwise the reconciliator's drift formula divides by 1 and
+// fires a false-positive alert on every healthy wallet.
+func TestWalletInitialBalanceLoaded(t *testing.T) {
+	pool := connect(t)
+	truncate(t, pool)
+	r := pgrepo.New(pool)
+	ctx := context.Background()
+
+	walletID := uuid.NewString()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO token_wallets (id, master_id, initial_balance, balance_movement) VALUES ($1, $2, 1000, 1000)`,
+		walletID, uuid.NewString(),
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := r.GetWallet(ctx, walletID)
+	if err != nil {
+		t.Fatalf("get wallet: %v", err)
+	}
+	if got.InitialBalance != 1000 {
+		t.Fatalf("GetWallet initial_balance: got %d, want 1000", got.InitialBalance)
+	}
+
+	list, err := r.ListWallets(ctx)
+	if err != nil {
+		t.Fatalf("list wallets: %v", err)
+	}
+	if len(list) != 1 || list[0].InitialBalance != 1000 {
+		t.Fatalf("ListWallets initial_balance: got %+v, want one wallet with InitialBalance=1000", list)
+	}
+}
+
+// TestReserveCommitDriftSteadyState pins the Blocker 2/3 invariant: a
+// healthy Reserve+Commit cycle on a wallet with non-zero
+// initial_balance must produce sum_posted + (initial - movement) == 0.
+// Counterpart to memrepo's TestReconciliator_NoDriftQuiet against the
+// real database.
+func TestReserveCommitDriftSteadyState(t *testing.T) {
+	pool := connect(t)
+	truncate(t, pool)
+	r := pgrepo.New(pool)
+	ctx := context.Background()
+
+	walletID := uuid.NewString()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO token_wallets (id, master_id, initial_balance, balance_movement) VALUES ($1, $2, 1000, 1000)`,
+		walletID, uuid.NewString(),
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	persisted, err := r.Reserve(ctx, walletID, wallet.LedgerEntry{
+		WalletID:  walletID,
+		Kind:      wallet.KindDebit,
+		Source:    wallet.SourceLLMCall,
+		Amount:    100,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := r.Commit(ctx, persisted.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	w, err := r.GetWallet(ctx, walletID)
+	if err != nil {
+		t.Fatalf("get wallet: %v", err)
+	}
+	sum, err := r.SumPostedByWallet(ctx, walletID)
+	if err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	residual := sum + (w.InitialBalance - w.BalanceMovement)
+	if residual != 0 {
+		t.Fatalf("steady-state drift residual: got %d (sum=%d, initial=%d, movement=%d), want 0",
+			residual, sum, w.InitialBalance, w.BalanceMovement)
 	}
 }

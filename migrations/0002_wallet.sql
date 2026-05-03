@@ -22,12 +22,24 @@
 --     with source='reconciliation'.
 --   - Defense in depth: the balance_movement >= 0 CHECK is the DB-level
 --     invariant that backs up the application's atomic-reserve guard.
+--
+-- Drift invariant (used by the nightly reconciliator):
+--   For any wallet in steady state (no pending entries):
+--     sum_posted_signed + (initial_balance - balance_movement) == 0
+--   initial_balance is the genesis-grant snapshot captured at wallet
+--   creation; it never changes. The reconciliator divides the residual
+--   by initial_balance to compute drift_pct, so the column MUST be
+--   populated at insert time, not left at the default 0.
 
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS token_wallets (
     id                 UUID PRIMARY KEY,
     master_id          UUID NOT NULL,
+    -- initial_balance is the genesis grant — the value of balance_movement
+    -- at wallet creation. It is the denominator of the nightly drift
+    -- formula and MUST NOT change over the wallet's lifetime.
+    initial_balance    BIGINT NOT NULL DEFAULT 0 CHECK (initial_balance >= 0),
     -- Defense in depth: balance_movement >= 0 is the DB-level invariant
     -- backing the application's atomic-reserve guard. If a code path
     -- ever tries to drain the wallet past zero, this CHECK is the
