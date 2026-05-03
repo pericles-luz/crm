@@ -264,6 +264,84 @@ func TestRawEventStore_InsertError(t *testing.T) {
 	}
 }
 
+// rev 3 / F-13 + SecurityEngineer quality note 2: 2-rotation token
+// chain. Operator rotates twice within the overlap window, leaving
+// THREE coexisting rows for the same tenant on the same channel:
+//
+//   - H1: revoked_at = T0+5m  (grace from rotation 1)
+//   - H2: revoked_at = T0+7m  (grace from rotation 2)
+//   - H3: revoked_at = NULL   (active after rotation 2)
+//
+// Within [T1=T0+2m, T0+5m] all three lookups MUST return the same
+// tenant. The order-by clause `(revoked_at IS NULL) DESC, created_at
+// DESC` only matters when multiple rows share token_hash (collision is
+// astronomical); each Lookup queries by token_hash so it is the one
+// row that comes back.
+func TestTokenStore_TwoRotationChain(t *testing.T) {
+	t.Parallel()
+	tenant := [16]byte{0xaa}
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	now := t0.Add(3 * time.Minute) // inside the overlap of all three
+
+	graceH1 := t0.Add(5 * time.Minute)
+	graceH2 := t0.Add(7 * time.Minute) // T1=T0+2m, overlap=5m → T0+7m
+
+	cases := []struct {
+		name    string
+		row     fakeRow
+		wantOK  bool
+		wantErr error
+	}{
+		{
+			"H1 still in grace",
+			fakeRow{values: []any{tenant, &graceH1}},
+			true, nil,
+		},
+		{
+			"H2 still in grace",
+			fakeRow{values: []any{tenant, &graceH2}},
+			true, nil,
+		},
+		{
+			"H3 active (revoked_at NULL)",
+			fakeRow{values: []any{tenant, (*time.Time)(nil)}},
+			true, nil,
+		},
+		{
+			"H0 fully expired (older rotation)",
+			fakeRow{values: []any{tenant, ptrTime(t0.Add(-1 * time.Minute))}},
+			false, webhook.ErrTokenRevoked,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn := stubConn{
+				queryRow: func(string, ...any) pgx.Row { return tc.row },
+			}
+			got, err := pgstore.NewTokenStore(conn).Lookup(context.Background(), "whatsapp", []byte{0x01}, now)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			if !tc.wantOK {
+				t.Fatalf("expected error, got tenant %v", got)
+			}
+			if webhook.TenantID(tenant) != got {
+				t.Fatalf("tenant = %v, want %v", got, tenant)
+			}
+		})
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
 // rev 3 / F-12: TenantAssociationStore returns true iff the
 // (tenant, channel, association) tuple exists in
 // tenant_channel_associations.

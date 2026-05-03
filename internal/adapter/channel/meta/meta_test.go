@@ -155,10 +155,14 @@ func TestParseEvent(t *testing.T) {
 	}
 }
 
-// rev 3 / F-12: BodyTenantAssociation extracts phone_number_id from
-// `entry[0].changes[0].value.metadata.phone_number_id`. Returns
-// (id, true) for a typical messages payload, ("", false) for envelopes
-// without the field (page subscription change, malformed bodies).
+// rev 3 / F-12 + fail-closed sub-rule (SecurityEngineer follow-up
+// 62d7529c): BodyTenantAssociation extracts phone_number_id from
+// `entry[0].changes[0].value.metadata.phone_number_id`. The Meta
+// adapter ALWAYS returns ok=true — empty assoc on missing/malformed
+// fields, which makes the body↔tenant cross-check fail-closed with
+// outcome `tenant_body_mismatch`. ok=false is reserved for future Meta
+// event types that legitimately carry no tenant identifier and is
+// gated by the convention test (`// SecretScope justification:` marker).
 func TestBodyTenantAssociation(t *testing.T) {
 	t.Parallel()
 	a, _ := metaadapter.New("whatsapp", testSecret)
@@ -174,25 +178,27 @@ func TestBodyTenantAssociation(t *testing.T) {
 			`{"entry":[{"id":"1","time":1700000000,"changes":[{"value":{"metadata":{"phone_number_id":"PA"}}}]}]}`,
 			"PA", true,
 		},
+		// Fail-closed: every non-happy path returns ok=true with empty
+		// assoc so the cross-check fires and produces tenant_body_mismatch.
 		{
-			"empty entry",
+			"empty entry → fail-closed",
 			`{"entry":[]}`,
-			"", false,
+			"", true,
 		},
 		{
-			"entry without changes (page subscription)",
+			"entry without changes (legitimate-looking but unsupported here) → fail-closed",
 			`{"entry":[{"id":"1","time":1700000000}]}`,
-			"", false,
+			"", true,
 		},
 		{
-			"changes without metadata.phone_number_id",
+			"changes without metadata.phone_number_id → fail-closed",
 			`{"entry":[{"id":"1","time":1700000000,"changes":[{"value":{"metadata":{}}}]}]}`,
-			"", false,
+			"", true,
 		},
 		{
-			"malformed json",
+			"malformed json → fail-closed",
 			`{not json`,
-			"", false,
+			"", true,
 		},
 	}
 	for _, tc := range cases {
@@ -204,6 +210,25 @@ func TestBodyTenantAssociation(t *testing.T) {
 				t.Fatalf("BodyTenantAssociation = (%q,%v), want (%q,%v)", got, ok, tc.want, tc.ok)
 			}
 		})
+	}
+}
+
+// Attacker takes a Meta-valid messages body and surgically removes the
+// phone_number_id field. The adapter MUST NOT silently let this through
+// (which a naive ok=false implementation would do): the cross-check
+// SHOULD fire, and SHOULD fail. We assert the contract at the adapter
+// layer; T-G9 in service_test.go covers the end-to-end outcome.
+func TestBodyTenantAssociation_FailClosedOnSurgicalRemoval(t *testing.T) {
+	t.Parallel()
+	a, _ := metaadapter.New("whatsapp", testSecret)
+
+	body := `{"entry":[{"id":"1","time":1700000000,"changes":[{"value":{"metadata":{"display_phone_number":"+5511999"}}}]}]}`
+	got, ok := a.BodyTenantAssociation([]byte(body))
+	if !ok {
+		t.Fatal("ok=false on tampered body would skip cross-check (security regression). Want ok=true with empty assoc.")
+	}
+	if got != "" {
+		t.Fatalf("assoc = %q, want \"\" (cross-check should fail)", got)
 	}
 }
 

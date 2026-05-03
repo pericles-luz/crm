@@ -143,32 +143,57 @@ func (a *Adapter) ParseEvent(body []byte) (webhook.Event, error) {
 }
 
 // BodyTenantAssociation implements webhook.ChannelAdapter (rev 3 /
-// F-12). For Meta WhatsApp Cloud the source-of-truth identifier of the
-// destined tenant is `entry[0].changes[0].value.metadata.phone_number_id`
-// — that is the phone number the message was sent to.
+// F-12, fail-closed sub-rule per follow-up SecurityEngineer 62d7529c).
 //
-// Return semantics:
-//   - (id, true) when the payload is a "messages" envelope and the id
-//     is non-empty (most common path: inbound message / status update).
-//   - ("", false) when the body has no .changes[0].value.metadata.
-//     phone_number_id field. This covers Meta's other notification
-//     types (page subscription change, account update, account
-//     verification challenge): they do not declare a phone-number-scoped
-//     destination and the platform's app-secret HMAC is the only
-//     attestation we have. The handler skips the cross-check; the alert
-//     rule on `tenant_body_mismatch_rate` continues to monitor the
-//     "messages" path which is by far the dominant traffic shape.
+// Contract for this Meta adapter — explicit because reviewers will
+// audit it and the rule is non-obvious:
+//
+//   - The current scope of this adapter is **tenant-scoped Meta events**
+//     (WhatsApp messages, message-status callbacks, IG/FB inbound
+//     messages). Every such event includes a tenant identifier under
+//     `entry[0].changes[0].value.metadata.phone_number_id` per Meta's
+//     documented schema. The handler MUST cross-check that identifier
+//     against tenant_channel_associations before treating the body as
+//     authenticated for the URL-resolved tenant.
+//
+//   - Therefore this method ALWAYS returns ok=true. We never return
+//     ok=false — that would skip the cross-check, opening a vector
+//     where an attacker submits a Meta-shape body with the phone_number_id
+//     surgically removed and gets a free pass. Fail-closed by design:
+//
+//     • body with phone_number_id present  → (id, true).
+//     • body parseable but field missing   → ("", true) — cross-check
+//       fails with outcome `tenant_body_mismatch`.
+//     • body completely malformed JSON     → ("", true) — same; the
+//       request is dropped here rather than reaching ParseEvent. Either
+//       drop is silent 200 anti-enumeration; the operator distinguishes
+//       them via metric outcome labels.
+//
+//   - When (and only when) this adapter is extended to support Meta
+//     event types that do NOT carry a phone_number_id (e.g. account-
+//     level subscription changes), that branch MUST add a comment of
+//     the form `// SecretScope justification:` next to the ok=false
+//     return — the convention test in adapter/channel asserts that
+//     marker is present whenever a `false` literal is returned from a
+//     BodyTenantAssociation method. Approving such a path is a
+//     SecurityEngineer review item.
 func (*Adapter) BodyTenantAssociation(body []byte) (string, bool) {
 	var p metaPayload
 	if err := json.Unmarshal(body, &p); err != nil {
-		return "", false
+		// Fail-closed: cross-check will fail with tenant_body_mismatch.
+		return "", true
 	}
 	if len(p.Entry) == 0 || len(p.Entry[0].Changes) == 0 {
-		return "", false
+		// Fail-closed: every supported Meta event carries
+		// entry[0].changes[0]; absence implies either an unsupported
+		// event type or a tampered body.
+		return "", true
 	}
 	id := p.Entry[0].Changes[0].Value.Metadata.PhoneNumberID
 	if id == "" {
-		return "", false
+		// Fail-closed: phone_number_id is mandatory in Meta's "messages"
+		// schema; absence is a tampering signal, not a legitimate skip.
+		return "", true
 	}
 	return id, true
 }

@@ -570,7 +570,7 @@ func TestService_TenantBodyMisrouting(t *testing.T) {
 		scope:     webhook.SecretScopeApp,
 		bodyAssoc: func([]byte) (string, bool) { return "phone_for_A", true },
 	}
-	svc, idem, raw, pub, tokens, metrics, _ := newServiceUnderTest(t, []webhook.ChannelAdapter{adapter}, func(c *webhook.Config) {
+	svc, idem, raw, pub, tokens, metrics, logger := newServiceUnderTest(t, []webhook.ChannelAdapter{adapter}, func(c *webhook.Config) {
 		c.TenantAssociationStore = &fakeAssoc{
 			allow: func(t webhook.TenantID, _ string, assoc string) bool {
 				return t == tenantA && assoc == "phone_for_A"
@@ -589,6 +589,24 @@ func TestService_TenantBodyMisrouting(t *testing.T) {
 	}
 	if res.TenantID != tenantB {
 		t.Fatalf("metric tenant should be URL-resolved tenant B, got %v", res.TenantID)
+	}
+	// Log invariant (SecurityEngineer quality note 3): the captured log
+	// record for tenant_body_mismatch MUST carry the URL-resolved tenant
+	// (B), never the body's claim tenant (A — which is attacker-supplied
+	// in the cross-tenant misrouting vector).
+	if got := len(logger.records); got != 1 {
+		t.Fatalf("captured logs = %d, want 1", got)
+	}
+	rec := logger.records[0]
+	if rec.Outcome != webhook.OutcomeTenantBodyMismatch {
+		t.Fatalf("log outcome = %s, want tenant_body_mismatch", rec.Outcome)
+	}
+	if !rec.HasTenantID || rec.TenantID != tenantB {
+		t.Fatalf("log tenant = %v hasTenant=%v, want tenantB=%v hasTenant=true (URL-resolved, not body claim)",
+			rec.TenantID, rec.HasTenantID, tenantB)
+	}
+	if rec.TenantID == tenantA {
+		t.Fatal("log MUST NOT carry attacker-controlled body claim tenant")
 	}
 	if len(idem.seen) != 0 {
 		t.Fatalf("idempotency rows = %d, want 0 (no insert on mismatch)", len(idem.seen))
