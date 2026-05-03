@@ -1,0 +1,114 @@
+# Prometheus alert rules for the webhook intake pipeline.
+#
+# Source spec: docs/adr/0075-webhook-security.md §5 ("Observabilidade").
+# Owning task: SIN-62275 (Webhook security alert rules + Grafana dashboard).
+#
+# Metric provenance — keep these in sync with
+# internal/adapter/observability/prometheus/metrics.go:
+#
+#   webhook_received_total{channel,outcome}
+#       Pre-HMAC outcomes only. NEVER labelled with tenant_id (ADR §2 D4).
+#       Includes: signature_invalid, unknown_token, revoked_token,
+#       timestamp_missing, timestamp_format_error, parse_error,
+#       unknown_channel, internal_error.
+#
+#   webhook_received_authenticated_total{channel,outcome,tenant_id}
+#       Post-HMAC outcomes only. Includes: accepted, replay,
+#       replay_window_violation, tenant_body_mismatch.
+#
+#   webhook_ack_duration_seconds{channel} (histogram)
+#   webhook_idempotency_conflict_total{channel,tenant_id}
+#   webhook_unpublished_event_count{channel} (gauge — exported by the
+#       reconciler scrape; pending wire-up tracked in the parent epic).
+groups:
+  - name: webhook-security
+    interval: 30s
+    rules:
+      - alert: WebhookSignatureInvalidRate
+        expr: sum by (channel) (rate(webhook_received_total{outcome="signature_invalid"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: page
+          team: platform
+          adr: "0075"
+        annotations:
+          summary: "Webhook HMAC signature failures sustained >0.05/s on {{ $labels.channel }}"
+          description: |
+            rate(webhook_received_total{outcome="signature_invalid"}[5m]) is
+            {{ printf "%.3f" $value }}/s on channel {{ $labels.channel }}, sustained
+            for 5 minutes. Either an attacker is forging requests, our HMAC
+            implementation regressed, or a partner rotated their secret without
+            telling us. Page on-call.
+          runbook_url: "docs/adr/0075-webhook-security.md#5-observabilidade-gate-de-prod"
+
+      - alert: WebhookUnknownTokenBurst
+        expr: sum by (channel) (increase(webhook_received_total{outcome="unknown_token"}[1h])) > 10
+        for: 5m
+        labels:
+          severity: ticket
+          team: platform
+          adr: "0075"
+        annotations:
+          summary: "Unknown webhook tokens >10/h on {{ $labels.channel }}"
+          description: |
+            increase(webhook_received_total{outcome="unknown_token"}[1h]) is
+            {{ printf "%.0f" $value }} on channel {{ $labels.channel }}. Likely
+            an operator-side misconfig (token typo, stale URL handed to a
+            partner) but can also indicate someone probing our intake URL.
+            Open a low-priority ticket; no page.
+          runbook_url: "docs/adr/0075-webhook-security.md#5-observabilidade-gate-de-prod"
+
+      - alert: WebhookReplayWindowViolationRate
+        expr: sum by (channel) (rate(webhook_received_authenticated_total{outcome="replay_window_violation"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: page
+          team: platform
+          adr: "0075"
+        annotations:
+          summary: "Replay window violations sustained >0.1/s on {{ $labels.channel }}"
+          description: |
+            rate(webhook_received_authenticated_total{outcome="replay_window_violation"}[5m])
+            is {{ printf "%.3f" $value }}/s on channel {{ $labels.channel }},
+            sustained for 5 minutes. The HMAC verified but the payload
+            timestamp is outside the ±5min replay window — strong replay-attack
+            signal. Page on-call.
+          runbook_url: "docs/adr/0075-webhook-security.md#5-observabilidade-gate-de-prod"
+
+      - alert: WebhookUnpublishedBacklog
+        expr: webhook_unpublished_event_count > 100
+        for: 10m
+        labels:
+          severity: page
+          team: platform
+          adr: "0075"
+        annotations:
+          summary: "Unpublished webhook backlog >100 on {{ $labels.channel }}"
+          description: |
+            webhook_unpublished_event_count{channel="{{ $labels.channel }}"} is
+            {{ printf "%.0f" $value }}, sustained for 10 minutes. Inserts to
+            raw_event are landing but the publish-to-NATS step is not draining.
+            Likely causes: NATS / JetStream down, reconciler stuck, or schema
+            broken on the publish path. Page on-call.
+          runbook_url: "docs/adr/0075-webhook-security.md#5-observabilidade-gate-de-prod"
+
+      - alert: WebhookTenantBodyMismatchRate
+        expr: sum by (channel, tenant_id) (rate(webhook_received_authenticated_total{outcome="tenant_body_mismatch"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: page
+          team: platform
+          adr: "0075"
+          finding: F-12
+        annotations:
+          summary: "Tenant/body mismatch >0.01/s on {{ $labels.channel }} for tenant {{ $labels.tenant_id }}"
+          description: |
+            rate(webhook_received_authenticated_total{outcome="tenant_body_mismatch"}[5m])
+            is {{ printf "%.4f" $value }}/s for channel {{ $labels.channel }} /
+            tenant {{ $labels.tenant_id }}, sustained for 5 minutes. Baseline
+            for this metric is ≈ 0 — either someone is POSTing a payload
+            destined for a different tenant to this tenant's URL
+            (cross-tenant misrouting attack) or an operator added a new
+            channel association (e.g. Meta phone_number_id) without
+            registering it in tenant_channel_associations. Page on-call.
+          runbook_url: "docs/adr/0075-webhook-security.md#5-observabilidade-gate-de-prod"
