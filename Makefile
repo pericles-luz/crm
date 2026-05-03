@@ -9,7 +9,7 @@ NOTENANT_BIN := $(CURDIR)/bin/notenant
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down logs test lint notenant migrate-up migrate-down seed-stg smoke-alert
+.PHONY: help up down logs test lint lint-aicache migrate-up migrate-down seed-stg smoke-alert
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -36,6 +36,10 @@ lint: notenant ## Run go vet + the notenant analyzer over internal/ (SIN-62232 /
 
 notenant: ## Build the notenant analyzer binary into bin/ (SIN-62232 / ADR 0071)
 	$(GO) build -o $(NOTENANT_BIN) ./tools/lint/notenant/cmd/notenant
+
+lint-aicache: ## Run the SIN-62236 aicache analyzer over internal/ai/ as a vet tool
+	$(GO) build -o ./bin/aicache ./cmd/aicache
+	$(GO) vet -vettool=$(CURDIR)/bin/aicache ./internal/ai/...
 
 migrate-up: ## Apply DB migrations (wired in PR2 with goose)
 	@echo "migrate-up: stub — PR2 (SIN Fase 0) wires goose against postgres service"
