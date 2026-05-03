@@ -25,7 +25,7 @@ ITEST_COVER_THRESHOLD ?= 85.0
 .DEFAULT_GOAL := help
 
 .PHONY: help up down logs test test-integration test-integration-cover \
-        lint lint-aicache lint-imports notenant forbidimport \
+        lint lint-aicache lint-customdomainnet lint-imports notenant forbidimport \
         migrate-up migrate-down seed-stg smoke-alert verify-vendor
 
 help: ## Show available targets
@@ -84,6 +84,10 @@ lint: notenant lint-imports ## Run go vet + the notenant + forbidimport analyzer
 
 notenant: ## Build the notenant analyzer binary into bin/ (SIN-62232 / ADR 0071)
 	$(GO) build -o $(NOTENANT_BIN) ./tools/lint/notenant/cmd/notenant
+
+lint-customdomainnet: ## Run the SIN-62242 net/http guard analyzer over internal/customdomain/...
+	$(GO) build -o ./bin/customdomainnet ./cmd/customdomainnet
+	$(GO) vet -vettool=$(CURDIR)/bin/customdomainnet ./internal/customdomain/...
 
 forbidimport: ## Build the forbidimport analyzer binary into bin/ (SIN-62216)
 	$(GO) build -o $(FORBIDIMPORT_BIN) ./tools/lint/forbidimport/cmd/forbidimport

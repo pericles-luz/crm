@@ -1,0 +1,139 @@
+# ADR 0079 — Custom-domain ownership validation, anti-rebinding, rate limits
+
+- Status: Accepted
+- Date: 2026-05-03
+- Issue: [SIN-62242](/SIN/issues/SIN-62242) — F43 (CRITICAL) + F44 (HIGH) of the
+  custom-domain security review ([SIN-62220](/SIN/issues/SIN-62220#document-security-review))
+- Plan: [SIN-62226 doc decisions §1-§2](/SIN/issues/SIN-62226#document-decisions)
+
+## Context
+
+Sindireceita lets a tenant publish their CRM under a custom hostname
+(e.g. `crm.acme.com.br`). Once a tenant proves they own the hostname,
+Caddy issues an ACME certificate for it and routes the vhost to the
+tenant's slug. Two attack classes blocked merge of any custom-domain
+feature:
+
+- **F43 (SSRF via TLS issuance):** the older HTTP+DNS validator did a
+  parallel HTTP fetch of `http://<host>/.well-known/sindireceita-verify`
+  AND a TXT lookup. Either side passing was treated as ownership proof.
+  An attacker who pointed `evil.test` at a CRM internal IP could then
+  serve the verification file from inside our network and pass.
+- **F44 (DNS rebinding through ACME HTTP-01):** even with HTTP fetch
+  removed, Caddy itself does an HTTP-01 self-check during issuance, and
+  Caddy's resolver is the OS resolver. An authoritative server controlled
+  by the attacker can return a public IP to our validator and `127.0.0.1`
+  to the in-cluster ACME challenge, and Caddy will happily fetch the
+  challenge from itself.
+
+Both are textbook SSRF / OWASP A10 problems; they have to be closed at
+multiple layers — the use-case, the resolver, and the recursive cache.
+This ADR pins the contract for all three.
+
+## Decision
+
+### §1 — DNS-only ownership validation with IP allowlist
+
+The validator is **DNS-only**. There is no HTTP leg. The contract is:
+
+1. Look up A and AAAA for the hostname.
+2. If ANY answer falls inside the blocked CIDR list (below), reject with
+   `ErrPrivateIP` and emit `audit_log{event=customdomain_validate_blocked_ssrf}`.
+   The mixed-answer case (one public, one private) is a textbook
+   rebinding setup — it is rejected too.
+3. Look up TXT under `_crm-verify.<host>`. If no record carries the
+   expected token, reject with `ErrTokenMismatch` and emit
+   `audit_log{event=customdomain_validate_token_mismatch}`.
+4. On success, pin the **first non-blocked IP** as
+   `dns_resolution_log.pinned_ip` and persist
+   `verified_with_dnssec = (every answer carried the AD bit)`.
+
+The blocked CIDR list (mirrors `internal/customdomain/validation/blocklist.go`
+and `infra/caddy/unbound.conf`):
+
+| Range            | Reason                                |
+|------------------|---------------------------------------|
+| `10.0.0.0/8`     | RFC 1918 private                      |
+| `172.16.0.0/12`  | RFC 1918 private                      |
+| `192.168.0.0/16` | RFC 1918 private                      |
+| `127.0.0.0/8`    | IPv4 loopback                         |
+| `169.254.0.0/16` | RFC 3927 link-local incl. cloud IMDS  |
+| `100.64.0.0/10`  | RFC 6598 CGNAT                        |
+| `0.0.0.0/8`      | RFC 1122 "this network"               |
+| `224.0.0.0/4`    | IPv4 multicast                        |
+| `::1/128`        | IPv6 loopback                         |
+| `fc00::/7`       | RFC 4193 IPv6 unique-local            |
+| `fe80::/10`      | IPv6 link-local                       |
+
+The validator is implemented as a pure-domain hexagonal use-case at
+`internal/customdomain/validation`. It MUST NOT import `net/http`; the
+custom analyzer at `internal/lint/customdomainnet` enforces this at
+compile time and the CI workflow `.github/workflows/customdomainnet-lint.yml`
+fails the build on violation.
+
+### §2 — DNS rebinding in ACME / Caddy
+
+A second leg of the F44 attack remains even after §1: Caddy's internal
+ACME issuance does its own DNS lookups. The mitigation is structural:
+**Caddy never talks to a public recursive resolver directly. It talks to
+the Unbound sidecar at `infra/caddy/unbound.conf`.**
+
+Unbound is configured with:
+
+- `private-address: …` — drops every RR matching the §1 blocklist.
+- `deny-answer-address: …` — refuses the WHOLE answer if any RR matches,
+  closing the "good A + bad AAAA" rebinding case.
+- `harden-glue: yes` and `harden-referral-path: yes` — defends against
+  parent-zone glue stuffing.
+- DNSSEC validation is on; the AD bit Caddy receives is the AD bit
+  Unbound itself validated.
+
+Wiring: `deploy/compose/compose.yml` adds the sidecar service and pins
+`caddy.dns: ["unbound"]` so the OS resolver inside the Caddy container
+is also Unbound. Site blocks `import secure-resolvers` so the (future)
+DNS-01 challenge plugin uses the same path.
+
+The miekg-based application resolver (`adapters/dnsresolver/miekg`) is
+ALSO pointed at Unbound at boot in production wiring (issue B,
+[SIN-62243](/SIN/issues/SIN-62243)). That gives us a single chokepoint
+to upgrade — change Unbound, both validators move together.
+
+### §3 — Rate limits (handler-level, defers to issue B)
+
+Token-guessing and SSRF-scan brute-forcing share the same shape: many
+fast Validate calls per source. Rate limiting is enforced at the handler
+layer (issue [SIN-62243](/SIN/issues/SIN-62243), F45). The buckets
+defined there apply BEFORE the handler reaches the validator:
+
+- 10 calls per minute per source IP.
+- 60 calls per hour per tenant.
+- A circuit breaker on `EventResolverError` so a single misbehaving
+  upstream resolver cannot stall every tenant's setup flow.
+
+The validator stays unaware of rate limits — it must remain a pure
+function of (host, expectedToken, resolver answer) for testability.
+
+## Consequences
+
+- The validator is small (1 use-case file, 1 blocklist file, 1 ports
+  file) and 100% covered by `go test`. The 85% acceptance gate is
+  comfortably exceeded.
+- Adding a CIDR to the blocklist requires editing TWO places:
+  `blocklist.go` AND `infra/caddy/unbound.conf`. A follow-up issue
+  (`0079b-blocklist-drift-test`) will automate the comparison.
+- Caddy's local-only stack now requires the Unbound image. The compose
+  healthcheck depends on `drill`; the chosen image (`mvance/unbound`)
+  ships it.
+- Tenants who publish IPv6-only without DNSSEC see
+  `verified_with_dnssec = false` in `dns_resolution_log` but still pass
+  validation. This matches the security review's recommendation
+  (observe, don't block; bumping to a hard requirement waits for
+  customer education).
+
+## Out of scope
+
+- The `/internal/tls/ask` Caddy on-demand handler ([SIN-62243](/SIN/issues/SIN-62243)).
+- Slug reservation rules ([SIN-62244](/SIN/issues/SIN-62244)).
+- The DNS-01 plugin migration (`0079a-acme-dns01`) — non-blocking
+  follow-up; the current contract works with HTTP-01 because the
+  Unbound sidecar already covers that path.

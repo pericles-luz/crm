@@ -1,0 +1,379 @@
+package validation_test
+
+import (
+	"context"
+	"errors"
+	"net/netip"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pericles-luz/crm/internal/customdomain/validation"
+	"github.com/pericles-luz/crm/internal/iam/dnsresolver"
+)
+
+// fakeResolver is a deterministic in-memory dnsresolver.Resolver. It is
+// keyed on the exact host (lowercased, since Validate lowercases before
+// asking) so every test arms exactly the responses it needs.
+type fakeResolver struct {
+	ipAnswers map[string][]dnsresolver.IPAnswer
+	ipErrs    map[string]error
+	txtAns    map[string][]string
+	txtErrs   map[string]error
+}
+
+func newFakeResolver() *fakeResolver {
+	return &fakeResolver{
+		ipAnswers: map[string][]dnsresolver.IPAnswer{},
+		ipErrs:    map[string]error{},
+		txtAns:    map[string][]string{},
+		txtErrs:   map[string]error{},
+	}
+}
+
+func (f *fakeResolver) LookupIP(_ context.Context, host string) ([]dnsresolver.IPAnswer, error) {
+	if e, ok := f.ipErrs[host]; ok {
+		return nil, e
+	}
+	return f.ipAnswers[host], nil
+}
+
+func (f *fakeResolver) LookupTXT(_ context.Context, host string) ([]string, error) {
+	if e, ok := f.txtErrs[host]; ok {
+		return nil, e
+	}
+	return f.txtAns[host], nil
+}
+
+// recordingAuditor captures every AuditEvent so tests can assert exactly
+// one event of the expected type was recorded per Validate call.
+type recordingAuditor struct {
+	mu     sync.Mutex
+	events []validation.AuditEvent
+}
+
+func (r *recordingAuditor) Record(_ context.Context, e validation.AuditEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+
+func (r *recordingAuditor) only() validation.AuditEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.events) != 1 {
+		panic("expected exactly one audit event")
+	}
+	return r.events[0]
+}
+
+// fixedClock returns a stable time so VerifiedAt is comparable.
+type fixedClock struct{ t time.Time }
+
+func (f fixedClock) Now() time.Time { return f.t }
+
+func ip(s string) netip.Addr { return netip.MustParseAddr(s) }
+
+// helper to build a Validator with deterministic auditor + clock.
+func newValidator(r dnsresolver.Resolver, a validation.Auditor) (*validation.Validator, time.Time) {
+	t := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	return validation.New(r, a, fixedClock{t: t}), t
+}
+
+func TestValidate_HappyPath_PinsIPAndDNSSEC(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{
+		{IP: ip("203.0.113.10"), VerifiedWithDNSSEC: true},
+	}
+	r.txtAns["_crm-verify.acme.example"] = []string{"crm-verify=token-abc"}
+	a := &recordingAuditor{}
+	v, fixedT := newValidator(r, a)
+
+	res, err := v.Validate(context.Background(), "acme.example", "crm-verify=token-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IP != ip("203.0.113.10") {
+		t.Fatalf("pinned IP mismatch: got %v", res.IP)
+	}
+	if !res.VerifiedWithDNSSEC {
+		t.Fatalf("DNSSEC flag should be true when every answer is signed")
+	}
+	if !res.VerifiedAt.Equal(fixedT) {
+		t.Fatalf("VerifiedAt should equal clock.Now")
+	}
+	got := a.only()
+	if got.Event != validation.EventValidatedOK {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventValidatedOK)
+	}
+	if got.Detail["ip"] != "203.0.113.10" {
+		t.Fatalf("audit detail.ip = %s", got.Detail["ip"])
+	}
+	if got.Detail["dnssec"] != "true" {
+		t.Fatalf("audit detail.dnssec = %s", got.Detail["dnssec"])
+	}
+}
+
+func TestValidate_HappyPath_DNSSECFalseWhenAnyAnswerUnsigned(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{
+		{IP: ip("203.0.113.10"), VerifiedWithDNSSEC: true},
+		{IP: ip("203.0.113.11"), VerifiedWithDNSSEC: false},
+	}
+	r.txtAns["_crm-verify.acme.example"] = []string{"crm-verify=token"}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	res, err := v.Validate(context.Background(), "acme.example", "crm-verify=token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.VerifiedWithDNSSEC {
+		t.Fatalf("worst-case rule: any unsigned answer must drop DNSSEC flag")
+	}
+}
+
+func TestValidate_BlockedSSRF_Loopback(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["evil.example"] = []dnsresolver.IPAnswer{{IP: ip("127.0.0.1")}}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "evil.example", "tok")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("err = %v, want ErrPrivateIP", err)
+	}
+	if got := a.only(); got.Event != validation.EventBlockedSSRF {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventBlockedSSRF)
+	}
+	// We MUST NOT mirror the resolved IP back into the audit log.
+	for _, v := range a.events[0].Detail {
+		if strings.Contains(v, "127.0.0.1") {
+			t.Fatalf("audit detail leaks resolved IP: %v", a.events[0].Detail)
+		}
+	}
+}
+
+func TestValidate_BlockedSSRF_IMDS(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["aws-meta.example"] = []dnsresolver.IPAnswer{{IP: ip("169.254.169.254")}}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "aws-meta.example", "tok")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("err = %v, want ErrPrivateIP", err)
+	}
+	if got := a.only(); got.Event != validation.EventBlockedSSRF {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventBlockedSSRF)
+	}
+}
+
+func TestValidate_BlockedSSRF_PrivateIPv6(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["v6.example"] = []dnsresolver.IPAnswer{{IP: ip("fc00::1")}}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "v6.example", "tok")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("err = %v, want ErrPrivateIP for IPv6 ULA", err)
+	}
+}
+
+func TestValidate_BlockedSSRF_MixedAnswerStillRejects(t *testing.T) {
+	// One public + one private = SSRF rebinding setup; reject.
+	r := newFakeResolver()
+	r.ipAnswers["mixed.example"] = []dnsresolver.IPAnswer{
+		{IP: ip("203.0.113.42")},
+		{IP: ip("10.0.0.5")},
+	}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "mixed.example", "tok")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("mixed-answer rebinding setup must be rejected; got %v", err)
+	}
+}
+
+func TestValidate_BlockedSSRF_V4MappedV6(t *testing.T) {
+	// Attacker tries to smuggle 127.0.0.1 as ::ffff:127.0.0.1.
+	r := newFakeResolver()
+	r.ipAnswers["smuggle.example"] = []dnsresolver.IPAnswer{{IP: ip("::ffff:127.0.0.1")}}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "smuggle.example", "tok")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("v4-mapped-v6 loopback must be rejected; got %v", err)
+	}
+}
+
+func TestValidate_BlockedSSRF_InvalidAddress(t *testing.T) {
+	// An adapter that returns a zero netip.Addr is buggy, but we must
+	// still refuse to validate (defence in depth).
+	r := newFakeResolver()
+	r.ipAnswers["zero.example"] = []dnsresolver.IPAnswer{{IP: netip.Addr{}}}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "zero.example", "tok")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("zero IP must be treated as blocked; got %v", err)
+	}
+}
+
+func TestValidate_TokenMismatch(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	r.txtAns["_crm-verify.acme.example"] = []string{"crm-verify=other-token"}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "acme.example", "crm-verify=token-abc")
+	if !errors.Is(err, validation.ErrTokenMismatch) {
+		t.Fatalf("err = %v, want ErrTokenMismatch", err)
+	}
+	if got := a.only(); got.Event != validation.EventTokenMismatch {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventTokenMismatch)
+	}
+}
+
+func TestValidate_TokenMatch_FromOneOfManyTXTs(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	r.txtAns["_crm-verify.acme.example"] = []string{
+		"v=spf1 include:_spf.example -all",
+		"crm-verify=token-abc",
+	}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	if _, err := v.Validate(context.Background(), "acme.example", "crm-verify=token-abc"); err != nil {
+		t.Fatalf("expected success when token is among multiple TXTs: %v", err)
+	}
+}
+
+func TestValidate_NoAddress(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["empty.example"] = []dnsresolver.IPAnswer{}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "empty.example", "tok")
+	if !errors.Is(err, validation.ErrNoAddress) {
+		t.Fatalf("err = %v, want ErrNoAddress", err)
+	}
+	if got := a.only(); got.Event != validation.EventNoAddress {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventNoAddress)
+	}
+}
+
+func TestValidate_ResolverError_OnIPLookup(t *testing.T) {
+	r := newFakeResolver()
+	r.ipErrs["bork.example"] = dnsresolver.ErrTimeout
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "bork.example", "tok")
+	if !errors.Is(err, dnsresolver.ErrTimeout) {
+		t.Fatalf("error chain must wrap dnsresolver.ErrTimeout; got %v", err)
+	}
+	if got := a.only(); got.Event != validation.EventResolverError {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventResolverError)
+	}
+	if got := a.events[0]; got.Detail["phase"] != "ip" {
+		t.Fatalf("phase detail = %s, want ip", got.Detail["phase"])
+	}
+}
+
+func TestValidate_ResolverError_OnTXTLookup(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	r.txtErrs["_crm-verify.acme.example"] = errors.New("upstream blew up")
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	_, err := v.Validate(context.Background(), "acme.example", "tok")
+	if err == nil || !strings.Contains(err.Error(), "upstream blew up") {
+		t.Fatalf("err must wrap TXT-lookup failure; got %v", err)
+	}
+	if got := a.only(); got.Event != validation.EventResolverError {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventResolverError)
+	}
+	if got := a.events[0]; got.Detail["phase"] != "txt" {
+		t.Fatalf("phase detail = %s, want txt", got.Detail["phase"])
+	}
+}
+
+func TestValidate_EmptyHost(t *testing.T) {
+	a := &recordingAuditor{}
+	v, _ := newValidator(newFakeResolver(), a)
+
+	_, err := v.Validate(context.Background(), "  ", "tok")
+	if !errors.Is(err, validation.ErrEmptyHost) {
+		t.Fatalf("err = %v, want ErrEmptyHost", err)
+	}
+	if got := a.only(); got.Event != validation.EventEmptyInput || got.Detail["reason"] != "host" {
+		t.Fatalf("audit = %+v", got)
+	}
+}
+
+func TestValidate_EmptyToken(t *testing.T) {
+	a := &recordingAuditor{}
+	v, _ := newValidator(newFakeResolver(), a)
+
+	_, err := v.Validate(context.Background(), "acme.example", " ")
+	if !errors.Is(err, validation.ErrEmptyToken) {
+		t.Fatalf("err = %v, want ErrEmptyToken", err)
+	}
+	if got := a.only(); got.Event != validation.EventEmptyInput || got.Detail["reason"] != "token" {
+		t.Fatalf("audit = %+v", got)
+	}
+}
+
+func TestValidate_HostIsLowercased(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	r.txtAns["_crm-verify.acme.example"] = []string{"tok"}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	if _, err := v.Validate(context.Background(), "  ACME.Example ", "tok"); err != nil {
+		t.Fatalf("Validate must lowercase + trim host: %v", err)
+	}
+}
+
+func TestValidate_NilAuditorIsTolerated(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	r.txtAns["_crm-verify.acme.example"] = []string{"tok"}
+	v := validation.New(r, nil, fixedClock{t: time.Now()})
+
+	if _, err := v.Validate(context.Background(), "acme.example", "tok"); err != nil {
+		t.Fatalf("nil auditor must use noop fallback: %v", err)
+	}
+}
+
+func TestSystemClock_NowIsUTC(t *testing.T) {
+	if got := (validation.SystemClock{}).Now(); got.Location() != time.UTC {
+		t.Fatalf("SystemClock.Now must be UTC, got %v", got.Location())
+	}
+}
+
+func TestValidate_TXTTokenIsTrimmed(t *testing.T) {
+	// Some DNS providers add trailing whitespace; reject only on real
+	// mismatches.
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	r.txtAns["_crm-verify.acme.example"] = []string{"  tok\n"}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	if _, err := v.Validate(context.Background(), "acme.example", "tok"); err != nil {
+		t.Fatalf("trimmed TXT should match: %v", err)
+	}
+}
+

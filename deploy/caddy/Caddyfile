@@ -11,6 +11,26 @@
 	# Local-only stack: disable automatic public ACME until staging.
 	auto_https off
 	admin off
+
+	# ADR 0079 §2 (SIN-62242). All recursive DNS queries Caddy makes
+	# from within a Caddyfile site — DNS-01 challenge resolution today
+	# (the future `0079a-acme-dns01` plugin), and any other site-level
+	# DNS lookup — are pinned to the Unbound sidecar. Unbound REFUSES
+	# to return a private/loopback/link-local address, so an attacker
+	# who publishes evil.test → 127.0.0.1 cannot make Caddy issue a
+	# certificate against that response.
+	#
+	# Caddy's HTTP-01 challenge target is resolved via the container's
+	# /etc/resolv.conf; in deploy/compose/compose.yml the caddy service
+	# sets `dns: ["unbound"]` so the OS resolver is also Unbound. That
+	# closes the second leg of the F44 attack surface.
+	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+(secure-resolvers) {
+	tls {
+		resolvers unbound:5353
+	}
 }
 
 # Plain HTTP passthrough for local smoke checks (curl http://localhost:8080/health).
@@ -22,6 +42,7 @@
 # Wildcard tenant vhost. TLS is auto-managed in stg/prod (PR9 wires the issuer).
 *.crm.local, crm.local {
 	import security-headers.caddy
+	import secure-resolvers
 	reverse_proxy app:8080
 
 	encode zstd gzip

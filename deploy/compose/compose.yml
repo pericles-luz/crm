@@ -104,11 +104,30 @@ services:
       nats: { condition: service_healthy }
       minio: { condition: service_healthy }
 
+  # ADR 0079 §2 — Unbound sidecar that protects ACME HTTP-01 / DNS-01
+  # challenges from DNS rebinding into private/loopback ranges. Caddy is
+  # configured (Caddyfile dns_resolvers) to send EVERY recursive query
+  # through this sidecar; nothing else in the compose network should.
+  unbound:
+    image: mvance/unbound:latest
+    restart: unless-stopped
+    networks: [crm]
+    volumes:
+      - ../../infra/caddy/unbound.conf:/opt/unbound/etc/unbound/a-records.conf:ro
+    healthcheck:
+      <<: *hd
+      test: ["CMD", "drill", "@127.0.0.1", "-p", "5353", "example.com"]
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     networks: [crm]
     ports: ["80:80", "443:443", "8080:8080"]
+    # ADR 0079 §2 (SIN-62242): pin Caddy's container resolver to the
+    # Unbound sidecar. This catches HTTP-01 challenge name resolution,
+    # which goes through the OS resolver (not Caddy's `tls.resolvers`
+    # block, which only covers DNS-01 plugin lookups).
+    dns: ["unbound"]
     environment:
       # Fase 0 default mirrors staging so a bad header rolls back in < 5 min.
       # Fase 1 production overrides to 63072000 (ADR 0082 / SIN-62229).
@@ -119,4 +138,6 @@ services:
       - ../caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
-    depends_on: [app]
+    depends_on:
+      app: { condition: service_started }
+      unbound: { condition: service_started }

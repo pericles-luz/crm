@@ -1,0 +1,47 @@
+# CI gate for SIN-62242 (ADR 0079 §1): runs the customdomainnet
+# analyzer's analysistest fixtures and then drives the analyzer over the
+# real internal/customdomain/ tree as a `go vet` tool. Either step
+# failing blocks merge.
+name: customdomainnet-lint
+
+on:
+  pull_request:
+    paths:
+      - "internal/customdomain/**"
+      - "internal/lint/customdomainnet/**"
+      - "cmd/customdomainnet/**"
+      - "adapters/dnsresolver/**"
+      - ".github/workflows/customdomainnet-lint.yml"
+      - "go.mod"
+      - "go.sum"
+  push:
+    branches: [main]
+
+jobs:
+  customdomainnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: analysistest fixtures (positive + negative cases)
+        run: go test ./internal/lint/customdomainnet/... -count=1
+
+      - name: build customdomainnet vet tool
+        run: go build -o ./bin/customdomainnet ./cmd/customdomainnet
+
+      - name: run analyzer over internal/customdomain
+        run: go vet -vettool=$(pwd)/bin/customdomainnet ./internal/customdomain/...
+
+      - name: full Go vet
+        run: go vet ./...
+
+      - name: validation package coverage gate (>=85%)
+        run: |
+          go test ./internal/customdomain/validation/... -count=1 -coverprofile=cover.out
+          pct=$(go tool cover -func=cover.out | awk '/total:/ {print $3}' | tr -d '%')
+          echo "validation coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit (p+0 >= 85) ? 0 : 1 }'
