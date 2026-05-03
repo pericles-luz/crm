@@ -24,4 +24,12 @@ type Metrics interface {
 	SetReconciliationDriftPct(walletID string, pct float64)
 	// SetOpenRouterDriftPct sets wallet_openrouter_drift_pct{master_id}.
 	SetOpenRouterDriftPct(masterID string, pct float64)
+	// RetainReconciliationDriftLabels prunes wallet_reconciliation_drift_pct
+	// label series whose wallet_id is not in active. Adapters must call
+	// DeleteLabelValues on the dropped ids so the Prometheus registry
+	// stops exporting dead series after wallet churn.
+	RetainReconciliationDriftLabels(active []string)
+	// RetainOpenRouterDriftLabels prunes wallet_openrouter_drift_pct
+	// label series whose master_id is not in active.
+	RetainOpenRouterDriftLabels(active []string)
 }

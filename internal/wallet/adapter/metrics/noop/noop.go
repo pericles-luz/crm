@@ -51,6 +51,38 @@ func (m *Metrics) SetOpenRouterDriftPct(masterID string, pct float64) {
 	m.driftByMaster[masterID] = pct
 }
 
+// RetainReconciliationDriftLabels mirrors the prom adapter: drops wallet
+// ids that fell out of the active set so tests can assert the pruning
+// contract without a Prometheus registry (SIN-62269).
+func (m *Metrics) RetainReconciliationDriftLabels(active []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keep := make(map[string]struct{}, len(active))
+	for _, id := range active {
+		keep[id] = struct{}{}
+	}
+	for id := range m.driftByWallet {
+		if _, ok := keep[id]; !ok {
+			delete(m.driftByWallet, id)
+		}
+	}
+}
+
+// RetainOpenRouterDriftLabels mirrors the prom adapter for master ids.
+func (m *Metrics) RetainOpenRouterDriftLabels(active []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keep := make(map[string]struct{}, len(active))
+	for _, id := range active {
+		keep[id] = struct{}{}
+	}
+	for id := range m.driftByMaster {
+		if _, ok := keep[id]; !ok {
+			delete(m.driftByMaster, id)
+		}
+	}
+}
+
 // Snapshot returns a copy of every counter and gauge for assertions.
 type Snapshot struct {
 	CommitRetry      map[port.CommitOutcome]int64

@@ -72,6 +72,18 @@ func (r *Repo) SeedWallet(w wallet.Wallet) {
 	r.wallets[w.ID] = w
 }
 
+// DeleteWallet removes a wallet from the in-memory store. It is a test
+// helper for simulating wallet churn — the production pgx adapter
+// performs deletes through the wallet domain operations, but the
+// reconciliator only sees a wallet via ListWallets so a direct removal
+// here matches the "wallet fell out of ListWallets" condition exercised
+// by SIN-62269.
+func (r *Repo) DeleteWallet(walletID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.wallets, walletID)
+}
+
 // FailNext makes the next mutating call return ErrInjected.
 func (r *Repo) FailNext() { r.failOnce.Store(true) }
 

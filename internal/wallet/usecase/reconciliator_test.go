@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/pericles-luz/crm/internal/wallet"
 	"github.com/pericles-luz/crm/internal/wallet/adapter/memrepo"
 	"github.com/pericles-luz/crm/internal/wallet/adapter/metrics/noop"
+	prommetrics "github.com/pericles-luz/crm/internal/wallet/adapter/metrics/prom"
 	"github.com/pericles-luz/crm/internal/wallet/adapter/queue/inmem"
 	"github.com/pericles-luz/crm/internal/wallet/port"
 	"github.com/pericles-luz/crm/internal/wallet/usecase"
@@ -245,5 +248,162 @@ func TestReconciliator_PendingGauge(t *testing.T) {
 	_ = r.RunOnce(context.Background())
 	if metrics.Snapshot().Pending != 2 {
 		t.Fatalf("pending gauge: got %d, want 2", metrics.Snapshot().Pending)
+	}
+}
+
+// hasDriftSeries reports whether wallet_reconciliation_drift_pct is
+// currently exporting a series for walletID.
+func hasDriftSeries(t *testing.T, reg *prometheus.Registry, walletID string) bool {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "wallet_reconciliation_drift_pct" {
+			continue
+		}
+		for _, mt := range mf.GetMetric() {
+			for _, lp := range mt.GetLabel() {
+				if lp.GetName() == "wallet_id" && lp.GetValue() == walletID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasOpenRouterSeries reports whether wallet_openrouter_drift_pct is
+// currently exporting a series for masterID.
+func hasOpenRouterSeries(t *testing.T, reg *prometheus.Registry, masterID string) bool {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "wallet_openrouter_drift_pct" {
+			continue
+		}
+		for _, mt := range mf.GetMetric() {
+			for _, lp := range mt.GetLabel() {
+				if lp.GetName() == "master_id" && lp.GetValue() == masterID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestReconciliator_PrunesDroppedWalletGauge is the SIN-62269 acceptance
+// test: register metrics for two wallets, drop one from ListWallets,
+// run a pass, and assert the dropped wallet's gauge series is no
+// longer exported by the Prometheus registry. Same coverage for the
+// OpenRouter master_id label so master-grant churn is also bounded.
+func TestReconciliator_PrunesDroppedWalletGauge(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 5, 1, 23, 0, 0, 0, time.UTC))
+	repo := memrepo.New()
+	repo.Now = clock.Now
+	repo.SeedWallet(wallet.Wallet{ID: "w1", MasterID: "m1", BalanceMovement: 500})
+	repo.SeedWallet(wallet.Wallet{ID: "w2", MasterID: "m2", BalanceMovement: 800})
+
+	reg := prometheus.NewRegistry()
+	metrics := prommetrics.New(reg)
+	r := usecase.Reconciliator{
+		Repo: repo, Queue: inmem.New(0), Metrics: metrics, Alerter: &recAlerter{}, Clock: clock,
+		OpenRouter: fakeOpenRouter{tokens: map[string]int64{"m1": 0, "m2": 0}},
+	}
+
+	// First pass — both wallets get drift series + openrouter series.
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if !hasDriftSeries(t, reg, "w1") || !hasDriftSeries(t, reg, "w2") {
+		t.Fatalf("first pass must register drift series for w1 and w2")
+	}
+	if !hasOpenRouterSeries(t, reg, "m1") || !hasOpenRouterSeries(t, reg, "m2") {
+		t.Fatalf("first pass must register openrouter series for m1 and m2")
+	}
+
+	// w2 falls out — simulating wallet deletion / churn.
+	repo.DeleteWallet("w2")
+
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+
+	if !hasDriftSeries(t, reg, "w1") {
+		t.Fatalf("w1 drift series must remain after pruning pass")
+	}
+	if hasDriftSeries(t, reg, "w2") {
+		t.Fatalf("w2 drift series leaked: dropped wallet must be pruned")
+	}
+	if !hasOpenRouterSeries(t, reg, "m1") {
+		t.Fatalf("m1 openrouter series must remain after pruning pass")
+	}
+	if hasOpenRouterSeries(t, reg, "m2") {
+		t.Fatalf("m2 openrouter series leaked: dropped master must be pruned")
+	}
+}
+
+// listFailingRepo wraps memrepo to inject a one-shot ListWallets error.
+// It satisfies port.Repository by embedding memrepo.Repo for every other
+// call, so the reconciliator still operates against the real adapter
+// for everything except the targeted failure point.
+type listFailingRepo struct {
+	*memrepo.Repo
+	failNext bool
+}
+
+func (r *listFailingRepo) ListWallets(ctx context.Context) ([]wallet.Wallet, error) {
+	if r.failNext {
+		r.failNext = false
+		return nil, errors.New("synthetic: ListWallets unavailable")
+	}
+	return r.Repo.ListWallets(ctx)
+}
+
+// TestReconciliator_ListWalletsErrorKeepsLabels guards the safety branch:
+// when ListWallets fails, the reconciliator must not prune label series,
+// otherwise a transient DB blip would wipe the gauge for every live
+// wallet.
+func TestReconciliator_ListWalletsErrorKeepsLabels(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 5, 1, 23, 0, 0, 0, time.UTC))
+	base := memrepo.New()
+	base.Now = clock.Now
+	base.SeedWallet(wallet.Wallet{ID: "w1", MasterID: "m1", BalanceMovement: 500})
+	repo := &listFailingRepo{Repo: base}
+
+	reg := prometheus.NewRegistry()
+	metrics := prommetrics.New(reg)
+	r := usecase.Reconciliator{
+		Repo: repo, Queue: inmem.New(0), Metrics: metrics, Alerter: &recAlerter{}, Clock: clock,
+		OpenRouter: fakeOpenRouter{tokens: map[string]int64{"m1": 0}},
+	}
+
+	// First pass registers w1 + m1.
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if !hasDriftSeries(t, reg, "w1") {
+		t.Fatalf("first pass must register w1")
+	}
+	if !hasOpenRouterSeries(t, reg, "m1") {
+		t.Fatalf("first pass must register m1")
+	}
+
+	// Force ListWallets to fail on the next pass.
+	repo.failNext = true
+	if err := r.RunOnce(context.Background()); err == nil {
+		t.Fatalf("expected ListWallets error to surface")
+	}
+
+	if !hasDriftSeries(t, reg, "w1") {
+		t.Fatalf("ListWallets error must not prune live wallet labels")
+	}
+	if !hasOpenRouterSeries(t, reg, "m1") {
+		t.Fatalf("ListWallets error must not prune live master labels")
 	}
 }

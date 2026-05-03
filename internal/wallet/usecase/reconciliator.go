@@ -89,9 +89,13 @@ func (r Reconciliator) RunOnce(ctx context.Context) error {
 	// because Reserve subtracts amount from balance_movement (debit) and
 	// Commit posts the same signed amount to the ledger. Drift is the
 	// magnitude of that residual normalised by initial_balance.
-	wallets, err := r.Repo.ListWallets(ctx)
-	keep(err)
+	wallets, listErr := r.Repo.ListWallets(ctx)
+	keep(listErr)
+	activeWalletIDs := make([]string, 0, len(wallets))
+	activeMasterIDs := make([]string, 0, len(wallets))
 	for _, w := range wallets {
+		activeWalletIDs = append(activeWalletIDs, w.ID)
+		activeMasterIDs = append(activeMasterIDs, w.MasterID)
 		sum, err := r.Repo.SumPostedByWallet(ctx, w.ID)
 		if err != nil {
 			keep(err)
@@ -120,6 +124,14 @@ func (r Reconciliator) RunOnce(ctx context.Context) error {
 				},
 			})
 		}
+	}
+	// Prune drift label series for wallets that fell out of ListWallets,
+	// otherwise the Prometheus registry leaks dead label sets forever
+	// proportional to wallet churn (SIN-62269). Only prune when the list
+	// itself succeeded — a transient ListWallets error must not delete
+	// labels for still-live wallets.
+	if listErr == nil {
+		r.Metrics.RetainReconciliationDriftLabels(activeWalletIDs)
 	}
 
 	// 4) OpenRouter external drift (optional)
@@ -151,6 +163,9 @@ func (r Reconciliator) RunOnce(ctx context.Context) error {
 					},
 				})
 			}
+		}
+		if listErr == nil {
+			r.Metrics.RetainOpenRouterDriftLabels(activeMasterIDs)
 		}
 	}
 	return firstErr
