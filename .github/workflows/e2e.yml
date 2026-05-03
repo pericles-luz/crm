@@ -1,0 +1,52 @@
+# SIN-62270 — browser E2E tests for the upload form.
+#
+# Runs `make e2e` against a freshly built Chrome (ubuntu-latest ships
+# google-chrome-stable in the runner image). The suite is gated behind
+# the `e2e` build tag so it doesn't run inside the normal `go test ./...`
+# pipeline; failures here block merge of changes that touch the upload
+# UI or its E2E harness.
+
+name: e2e
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  upload-form:
+    name: Upload form (chromedp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify Chrome is available
+        run: |
+          if ! command -v google-chrome >/dev/null 2>&1; then
+            echo "google-chrome missing on ubuntu-latest runner — installing"
+            sudo apt-get update -y
+            sudo apt-get install -y google-chrome-stable
+          fi
+          google-chrome --version
+
+      - name: Verify fixtures are reproducible
+        # Regenerating must yield identical bytes; if not, the committed
+        # fixtures are stale and the contributor needs to refresh them.
+        run: |
+          make e2e-fixtures
+          if ! git diff --quiet -- internal/adapter/web/upload/static/testdata; then
+            echo "::error::Committed fixtures differ from generator output. Run 'make e2e-fixtures' and commit the result."
+            git --no-pager diff -- internal/adapter/web/upload/static/testdata
+            exit 1
+          fi
+
+      - name: Run e2e suite
+        run: make e2e

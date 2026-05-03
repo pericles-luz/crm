@@ -8,7 +8,7 @@ GO ?= go
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down logs test lint jstest migrate-up migrate-down seed-stg smoke-alert
+.PHONY: help up down logs test lint jstest e2e e2e-fixtures migrate-up migrate-down seed-stg smoke-alert
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -34,6 +34,16 @@ lint: ## Run go vet (staticcheck wired in PR8)
 
 jstest: ## Run JS unit tests for the embedded upload helpers (SIN-62258)
 	node --test --experimental-test-coverage internal/adapter/web/upload/static/upload.test.js
+
+e2e: ## Run browser E2E tests for the upload form (SIN-62270, requires Chrome/Chromium)
+	@command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1 || { \
+		echo "make e2e: no chrome/chromium binary on PATH — see docs/e2e.md"; \
+		exit 1; \
+	}
+	$(GO) test -tags=e2e -count=1 -timeout=120s ./internal/e2e/...
+
+e2e-fixtures: ## Regenerate the SIN-62270 upload-form fixture bytes (PNG/EXE/SVG)
+	$(GO) run ./internal/adapter/web/upload/static/testdata/gen_fixtures.go
 
 migrate-up: ## Apply DB migrations (wired in PR2 with goose)
 	@echo "migrate-up: stub — PR2 (SIN Fase 0) wires goose against postgres service"
