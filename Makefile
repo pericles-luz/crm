@@ -1,10 +1,11 @@
 # CRM — Fase 0 Makefile (SIN-62208).
-# Targets: up, down, logs, test, lint, migrate-up, migrate-down, seed-stg, smoke-alert.
+# Targets: up, down, logs, test, lint, notenant, migrate-up, migrate-down, seed-stg, smoke-alert.
 
 SHELL := /bin/bash
 COMPOSE_DIR := deploy/compose
 COMPOSE := docker compose --project-directory $(COMPOSE_DIR) -f $(COMPOSE_DIR)/compose.yml
 GO ?= go
+NOTENANT_BIN := $(CURDIR)/bin/notenant
 
 .DEFAULT_GOAL := help
 
@@ -29,8 +30,12 @@ logs: ## Tail logs from every service
 test: ## Run Go test suite with coverage
 	$(GO) test ./... -race -count=1 -cover
 
-lint: ## Run go vet (staticcheck wired in PR8)
+lint: notenant ## Run go vet + the notenant analyzer over internal/ (SIN-62232 / ADR 0071)
 	$(GO) vet ./...
+	$(GO) vet -vettool=$(NOTENANT_BIN) ./internal/...
+
+notenant: ## Build the notenant analyzer binary into bin/ (SIN-62232 / ADR 0071)
+	$(GO) build -o $(NOTENANT_BIN) ./tools/lint/notenant/cmd/notenant
 
 lint-aicache: ## Run the SIN-62236 aicache analyzer over internal/ai/ as a vet tool
 	$(GO) build -o ./bin/aicache ./cmd/aicache
