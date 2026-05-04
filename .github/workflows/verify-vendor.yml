@@ -1,0 +1,36 @@
+# CI gate for SIN-62284 — vendored JS supply-chain integrity.
+#
+# Recomputes the sha-384 SRI hash of every file listed in
+# web/static/vendor/CHECKSUMS.txt and fails the workflow if any value
+# diverges. Also fails if a `.js` file appears under web/static/vendor/
+# that has no entry in CHECKSUMS.txt — that catches "I dropped a new
+# vendor file but forgot to regenerate CHECKSUMS.txt".
+#
+# Defence in depth — the same script is wired to `make verify-vendor`
+# so the check runs locally before commit too.
+name: verify-vendor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "web/static/vendor/**"
+      - "scripts/verify-vendor-checksums.sh"
+      - "scripts/update-vendor.sh"
+      - "Makefile"
+      - ".github/workflows/verify-vendor.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-vendor:
+    name: verify-vendor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck vendor scripts
+        run: shellcheck scripts/verify-vendor-checksums.sh scripts/update-vendor.sh
+      - name: verify SRI checksums
+        run: make verify-vendor
