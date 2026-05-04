@@ -1,0 +1,97 @@
+# Rate-limit policy — canonical numbers from ADR 0081 §1 (SIN-62229).
+#
+# This file is the source of truth for rate-limit budgets. Endpoint wiring
+# code reads it via internal/ratelimit/policy.Load and feeds the matched
+# rules into internal/web/middleware.Apply.
+#
+# enabled: false here is the global kill-switch (rollback path); the env var
+# RATELIMIT_ENABLED=false overrides it at boot.
+#
+# Each rule has:
+#   endpoint     human label, surfaced in metrics and logs (METHOD /path).
+#   bucket       label that names the bucket dimension (ip, email, …).
+#   key          how the bucket value is extracted at request time. One of:
+#                  ip                    → middleware.IPKey
+#                  form:<field>          → middleware.FormFieldKey(field)
+#                  header:<name>         → middleware.HeaderKey(name)
+#                  ctx:<key-name>        → middleware.ContextValueKey(<typed key resolved at wiring time>)
+#   limit:
+#     window     Go duration (e.g. 60s, 1h, 24h)
+#     max        events permitted within window
+#   fail_closed  true → 503 when limiter is unavailable; false → fail-open
+#                with X-RateLimit-Bypass: redis-unavailable.
+
+enabled: true
+
+rules:
+  - endpoint: "POST /login"
+    bucket: ip
+    key: ip
+    limit: { window: 1m, max: 5 }
+    fail_closed: true
+
+  - endpoint: "POST /login"
+    bucket: email
+    key: form:email
+    limit: { window: 1h, max: 10 }
+    fail_closed: true
+
+  - endpoint: "POST /2fa/verify"
+    bucket: session_id
+    key: header:X-Session-ID
+    limit: { window: 1m, max: 5 }
+    fail_closed: true
+
+  - endpoint: "POST /2fa/verify"
+    bucket: user_id
+    key: ctx:user_id
+    limit: { window: 1h, max: 20 }
+    fail_closed: true
+
+  - endpoint: "POST /password/reset"
+    bucket: email
+    key: form:email
+    limit: { window: 1h, max: 3 }
+    fail_closed: true
+
+  - endpoint: "POST /lgpd/export"
+    bucket: tenant_id
+    key: ctx:tenant_id
+    limit: { window: 24h, max: 1 }
+    fail_closed: true
+
+  - endpoint: "GET /billing/invoices/{id}"
+    bucket: user_id
+    key: ctx:user_id
+    limit: { window: 1m, max: 10 }
+    fail_closed: false
+
+  - endpoint: "POST /branding/logo"
+    bucket: tenant_id
+    key: ctx:tenant_id
+    limit: { window: 1h, max: 5 }
+    fail_closed: false
+
+  - endpoint: "POST /contacts/merge"
+    bucket: user_id
+    key: ctx:user_id
+    limit: { window: 1m, max: 30 }
+    fail_closed: false
+
+  - endpoint: "/m/*"
+    bucket: master_user_id
+    key: ctx:master_user_id
+    limit: { window: 1m, max: 30 }
+    fail_closed: true
+
+  - endpoint: "/api/*"
+    bucket: user_id
+    key: ctx:user_id
+    limit: { window: 1m, max: 60 }
+    fail_closed: false
+
+  - endpoint: "/api/*"
+    bucket: ip
+    key: ip
+    limit: { window: 1m, max: 60 }
+    fail_closed: false
