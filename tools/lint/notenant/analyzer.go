@@ -32,11 +32,11 @@ var Analyzer = &analysis.Analyzer{
 // Begin / BeginTx / Acquire / BeginTxFunc remain allowed because WithTenant
 // itself uses them.
 var forbiddenMethods = map[string]struct{}{
-	"Exec":     {},
-	"Query":    {},
-	"QueryRow": {},
+	"Exec":      {},
+	"Query":     {},
+	"QueryRow":  {},
 	"SendBatch": {},
-	"CopyFrom": {},
+	"CopyFrom":  {},
 }
 
 // pgxpoolPkgPath is the import path of the pgxpool subpackage; we match
