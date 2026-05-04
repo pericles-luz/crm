@@ -438,17 +438,25 @@ func TestApply_ExtractorOk_FalseSkipsRule(t *testing.T) {
 
 // --- KeyExtractor unit tests ---
 
+// TestIPKey asserts the default-deny contract of the package-level
+// IPKey symbol after SIN-62287. The two "x-forwarded-for ..." cases
+// previously asserted that IPKey trusted X-Forwarded-For unconditionally
+// (the regression of the SIN-62167 / SIN-62177 policy). They now assert
+// the corrected default: with no TrustedProxies configured, IPKey MUST
+// ignore the header and bucket per peer (RemoteAddr). The trusted-proxy
+// and rightmost-hop scenarios live in
+// TestIPKeyFrom_TrustedProxyXFFRightmost / TestIPKey_DefaultDeniesXFF.
 func TestIPKey(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name       string
-		xff        string
-		remote     string
-		want       string
-		wantOK     bool
+		name   string
+		xff    string
+		remote string
+		want   string
+		wantOK bool
 	}{
-		{"x-forwarded-for first hop", "203.0.113.10, 10.0.0.1", "10.0.0.1:80", "203.0.113.10", true},
-		{"x-forwarded-for single", "203.0.113.10", "10.0.0.1:80", "203.0.113.10", true},
+		{"x-forwarded-for ignored without trusted proxies (multi-hop)", "203.0.113.10, 10.0.0.1", "10.0.0.1:80", "10.0.0.1", true},
+		{"x-forwarded-for ignored without trusted proxies (single hop)", "203.0.113.10", "10.0.0.1:80", "10.0.0.1", true},
 		{"remoteaddr with port", "", "203.0.113.10:80", "203.0.113.10", true},
 		{"remoteaddr no port", "", "203.0.113.10", "203.0.113.10", true},
 		{"missing both", "", "", "", false},
