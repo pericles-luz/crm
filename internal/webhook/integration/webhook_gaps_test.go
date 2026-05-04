@@ -70,6 +70,55 @@ func TestTG4_CrossTenantIdempotencySegmentation(t *testing.T) {
 	}
 }
 
+// TestTG5_ReplayWindowViolation — ADR §4 T-G5 (rev 3).
+//
+// Regression gate against future widening of `Config.PastWindow` (default
+// 5 min per ADR §2 D3). A request signed and authenticated correctly but
+// carrying a payload timestamp 25 hours in the past must be dropped at
+// the timestamp-window check — *before* the idempotency INSERT and the
+// raw_event INSERT — and must not publish.
+//
+// This is intentionally distinct from T-1 (replay): T-1 asserts the
+// idempotency PK conflict path (`OutcomeReplay`); T-G5 asserts the
+// timestamp-out-of-range path (`OutcomeReplayWindowViolation`). If a
+// future change collapsed both into one outcome — or widened PastWindow
+// past 25h — this test would fail.
+func TestTG5_ReplayWindowViolation(t *testing.T) {
+	h := startHarness(t)
+	h.truncate(t)
+
+	tenant := mustParseTenant(t, "55555555-5555-5555-5555-555555555555")
+	insertToken(t, h.pool, tenant, "whatsapp", "tok-G5", 0, time.Time{})
+	insertAssociation(t, h.pool, tenant, "whatsapp", "PHONE-G5")
+
+	now := time.Now().UTC().Truncate(time.Second)
+	st := newStack(t, h, now)
+
+	// Body timestamp 25 hours in the past — far beyond any plausible
+	// PastWindow widening.
+	stale := now.Add(-25 * time.Hour)
+	req := signedMetaRequest(t, "whatsapp", "tok-G5", "PHONE-G5", stale)
+
+	res := st.svc.Handle(context.Background(), req)
+	if res.Outcome != webhook.OutcomeReplayWindowViolation {
+		t.Fatalf("Outcome = %s, want replay_window_violation (err=%v)", res.Outcome, res.Err)
+	}
+
+	// Window violation drops *before* idempotency INSERT — the row must
+	// not exist. A regression that widened PastWindow past 25h would let
+	// this row get written and OutcomeReplay would surface on a retry,
+	// not OutcomeReplayWindowViolation.
+	if got := countIdempotency(t, h.pool, tenant, "whatsapp"); got != 0 {
+		t.Errorf("webhook_idempotency rows = %d, want 0 (window violation must NOT insert)", got)
+	}
+	if got := countRawEvent(t, h.pool, tenant, "whatsapp"); got != 0 {
+		t.Errorf("raw_event rows = %d, want 0", got)
+	}
+	if calls := st.publisher.Calls(); len(calls) != 0 {
+		t.Errorf("publisher.Calls = %d, want 0 for window violation", len(calls))
+	}
+}
+
 // TestTG6_TokenRotationOverlap — ADR §4 T-G6.
 //
 // When a token rotates with overlap_minutes > 0, both the old (revoked
