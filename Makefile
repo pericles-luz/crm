@@ -1,5 +1,5 @@
 # CRM — Fase 0 Makefile (SIN-62208).
-# Targets: up, down, logs, test, lint, notenant, migrate-up, migrate-down, seed-stg, smoke-alert.
+# Targets: up, down, logs, test, lint, notenant, migrate-up, migrate-down, seed-stg, smoke-alert, verify-vendor.
 
 SHELL := /bin/bash
 COMPOSE_DIR := deploy/compose
@@ -9,7 +9,7 @@ NOTENANT_BIN := $(CURDIR)/bin/notenant
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down logs test lint lint-aicache migrate-up migrate-down seed-stg smoke-alert
+.PHONY: help up down logs test lint lint-aicache migrate-up migrate-down seed-stg smoke-alert verify-vendor
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -52,3 +52,6 @@ seed-stg: ## Seed staging fixtures (wired in PR2)
 
 smoke-alert: ## Inject a synthetic alert into Slack #alerts (wired in PR10)
 	@echo "smoke-alert: stub — PR10 (SIN Fase 0) implements Slack injection"
+
+verify-vendor: ## Verify SRI sha-384 hashes for web/static/vendor/** (SIN-62284)
+	./scripts/verify-vendor-checksums.sh
