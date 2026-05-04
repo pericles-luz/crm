@@ -10,7 +10,8 @@
 // What this package owns now:
 //
 //   - the EventPublisher implementation (Publish + Nats-Msg-Id header
-//     populated with hex(idempotency_key));
+//     populated with hex(eventID) — see Publish godoc for the
+//     equivalence note vs idempotency_key);
 //   - the startup config validator that fails-fast when a stream's
 //     Duplicates window is below 1 hour (rev 3 / F-14).
 package nats
@@ -90,9 +91,14 @@ func ValidateStream(ctx context.Context, js JetStream, streamName string) error 
 }
 
 // Publish implements webhook.EventPublisher. The Nats-Msg-Id (mapped
-// to JetStream's deduplication header) is populated with
-// hex(idempotency_key) so JetStream dedup catches duplicates published
-// by the request path + reconciler within MinDuplicatesWindow.
+// to JetStream's deduplication header) is populated with hex(eventID)
+// so JetStream dedup catches duplicates published by the request path
+// + reconciler within MinDuplicatesWindow. eventID is the raw_event.id
+// uuid; reconciler retries republish the same eventID for the same
+// pending row (ADR §D7), preserving the F-14 dedup property within
+// the 1h window. See the inline comment in the function body for why
+// eventID is preferred over idempotency_key here (functionally
+// equivalent for dedup, fewer round-trips on retry).
 func (p *Publisher) Publish(
 	ctx context.Context,
 	eventID [16]byte,
