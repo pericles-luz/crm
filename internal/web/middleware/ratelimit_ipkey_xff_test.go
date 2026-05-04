@@ -282,9 +282,10 @@ func TestApply_XFFRotationCannotBypassLoginIPBucket(t *testing.T) {
 // TestApply_TrustedProxyConsultsRightmostXFF mirrors the production
 // wiring: when cmd/server passes the front-door proxy CIDR list, the
 // per-real-client IP bucket actually buckets per-real-client. With XFF
-// "victim, our-proxy" arriving from a trusted peer, the rightmost hop
-// (the proxy's record of the real client just before its own rewrite)
-// is the bucket value.
+// "<attacker-poison>, <our-proxy's-record>" arriving from a trusted
+// peer, the rightmost hop (the trusted proxy's record of the real
+// client just before its own rewrite) is the bucket value, and the
+// leftmost attacker-supplied entry is ignored.
 func TestApply_TrustedProxyConsultsRightmostXFF(t *testing.T) {
 	t.Parallel()
 	clock := newFakeClock(time.Unix(1_700_000_000, 0))
@@ -302,9 +303,11 @@ func TestApply_TrustedProxyConsultsRightmostXFF(t *testing.T) {
 	}, middleware.Config{Now: clock.Now, Metrics: rec, Logger: discardLogger()})
 	h := mw(nextOK)
 
-	// 5 requests from the same real client, XFF = "<real>, <attacker>"
-	// where the attacker (leftmost) cannot poison the bucket because
-	// the extractor reads rightmost.
+	// 5 requests from the same real client. XFF arrives shaped as
+	// "<attacker-poison>, <real-client-as-seen-by-trusted-proxy>" —
+	// leftmost is the attacker-controlled origin (RFC 7239), rightmost
+	// is what survives the trusted-proxy rewrite. The extractor reads
+	// rightmost, so the attacker cannot poison the bucket value.
 	for i := 1; i <= 5; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(""))
 		req.RemoteAddr = "172.20.0.10:443" // trusted Caddy peer
