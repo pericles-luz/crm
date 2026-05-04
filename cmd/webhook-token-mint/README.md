@@ -134,6 +134,15 @@ plaintext line on a failure path** (because no row was created).
 - The CLI's database identity should be a dedicated role with
   `INSERT, UPDATE` on `webhook_tokens` only — not the same role the
   webhook handler uses (which only needs `SELECT, UPDATE last_used_at`).
+- **Treat the URL as a credential.** `/webhooks/{channel}/{plaintext}`
+  carries the plaintext in the path. Anything that logs the request
+  path captures the token. Operators MUST scrub `path` from
+  reverse-proxy / app-server access logs for `/webhooks/*` (the
+  Caddyfile in [SIN-62234](/SIN/issues/SIN-62234) already does this
+  on the runtime side — apply the same posture to anything in the
+  Meta operator's network that touches the URL). Treat the
+  plaintext-bearing URL as a one-time secret during the Meta-side
+  configuration handoff.
 
 ## Tests
 

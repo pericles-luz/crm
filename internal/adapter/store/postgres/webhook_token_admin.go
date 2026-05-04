@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -82,19 +81,14 @@ func (a *TokenAdmin) ScheduleRevocation(
 }
 
 // isUniqueViolation reports whether err is a Postgres unique-violation,
-// matched by SQLSTATE 23505. The pgx error chain may carry either a
-// *pgconn.PgError or a wrapper; we accept both.
+// matched by SQLSTATE 23505. pgx wraps the underlying error in a
+// *pgconn.PgError; errors.As walks the chain.
 func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == uniqueViolationCode
 	}
-	// Defence in depth: some test fakes only return a string-formed error,
-	// so allow callers to surface the SQLSTATE in the message.
-	return strings.Contains(err.Error(), uniqueViolationCode)
+	return false
 }
 
 // Compile-time assertion that *TokenAdmin satisfies the port.
