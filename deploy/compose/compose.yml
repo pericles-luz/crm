@@ -87,8 +87,14 @@ services:
     restart: unless-stopped
     networks: [crm]
     ports: ["80:80", "443:443", "8080:8080"]
+    environment:
+      # Fase 0 default mirrors staging so a bad header rolls back in < 5 min.
+      # Fase 1 production overrides to 63072000 (ADR 0082 / SIN-62229).
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
     volumes:
-      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount the directory (not just the Caddyfile) so the security-headers
+      # import in deploy/caddy/security-headers.caddy resolves inside the container.
+      - ../caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [app]
