@@ -43,7 +43,7 @@ func execute(ctx context.Context, getenv func(string) string) int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	stack, err := buildStack(ctx, cfg, logger, defaultPoolOpener)
+	stack, err := buildStack(ctx, cfg, logger, defaultPoolOpener, defaultPublisherFactory)
 	if err != nil {
 		log.Printf("crm: stack: %v", err)
 		return 1

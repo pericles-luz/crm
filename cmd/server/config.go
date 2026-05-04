@@ -24,6 +24,15 @@ type config struct {
 
 	DatabaseURL string
 
+	NATSURL                    string
+	NATSClientName             string
+	NATSCredsFile              string
+	NATSTLSCAFile              string
+	NATSTLSCertFile            string
+	NATSTLSKeyFile             string
+	NATSTLSServerName          string
+	NATSReconnectWait          time.Duration
+	NATSMaxReconnects          int
 	NATSStreamName             string
 	NATSSubjectPrefix          string
 	NATSStreamDuplicatesWindow time.Duration
@@ -40,6 +49,10 @@ func defaultConfig() config {
 	return config{
 		HTTPAddr:                   defaultAddr,
 		MetaChannels:               []string{"whatsapp", "instagram", "facebook"},
+		NATSURL:                    "nats://localhost:4222",
+		NATSClientName:             "crm-server",
+		NATSReconnectWait:          2 * time.Second,
+		NATSMaxReconnects:          -1,
 		NATSStreamName:             "WEBHOOKS",
 		NATSSubjectPrefix:          "webhooks.",
 		NATSStreamDuplicatesWindow: nats.MinDuplicatesWindow,
@@ -73,6 +86,28 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.MetaChannels = parseChannels(v)
 	}
 	cfg.DatabaseURL = getenv("DATABASE_URL")
+
+	if v := getenv("NATS_URL"); v != "" {
+		cfg.NATSURL = v
+	}
+	if v := getenv("NATS_CLIENT_NAME"); v != "" {
+		cfg.NATSClientName = v
+	}
+	cfg.NATSCredsFile = getenv("NATS_CREDS_FILE")
+	cfg.NATSTLSCAFile = getenv("NATS_TLS_CA_FILE")
+	cfg.NATSTLSCertFile = getenv("NATS_TLS_CERT_FILE")
+	cfg.NATSTLSKeyFile = getenv("NATS_TLS_KEY_FILE")
+	cfg.NATSTLSServerName = getenv("NATS_TLS_SERVER_NAME")
+	if d, ok, err := parseDurationEnv("NATS_RECONNECT_WAIT", getenv); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.NATSReconnectWait = d
+	}
+	if n, ok, err := parseIntEnv("NATS_MAX_RECONNECTS", getenv); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.NATSMaxReconnects = n
+	}
 
 	if v := getenv("NATS_STREAM_NAME"); v != "" {
 		cfg.NATSStreamName = v
@@ -118,18 +153,34 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	if cfg.WebhookV2Enabled {
-		if cfg.MetaAppSecret == "" {
-			return cfg, errors.New("META_APP_SECRET is required when WEBHOOK_SECURITY_V2_ENABLED=true")
-		}
-		if cfg.DatabaseURL == "" {
-			return cfg, errors.New("DATABASE_URL is required when WEBHOOK_SECURITY_V2_ENABLED=true")
-		}
-		if len(cfg.MetaChannels) == 0 {
-			return cfg, errors.New("META_CHANNELS must list at least one channel")
+		if err := validateFlagOnInvariants(cfg); err != nil {
+			return cfg, err
 		}
 	}
 
 	return cfg, nil
+}
+
+// validateFlagOnInvariants enforces the cross-field requirements that
+// only matter when WEBHOOK_SECURITY_V2_ENABLED=true. Extracted so tests
+// can poke specific fields without re-deriving the env getter.
+func validateFlagOnInvariants(cfg config) error {
+	if cfg.MetaAppSecret == "" {
+		return errors.New("META_APP_SECRET is required when WEBHOOK_SECURITY_V2_ENABLED=true")
+	}
+	if cfg.DatabaseURL == "" {
+		return errors.New("DATABASE_URL is required when WEBHOOK_SECURITY_V2_ENABLED=true")
+	}
+	if len(cfg.MetaChannels) == 0 {
+		return errors.New("META_CHANNELS must list at least one channel")
+	}
+	if cfg.NATSURL == "" {
+		return errors.New("NATS_URL is required when WEBHOOK_SECURITY_V2_ENABLED=true")
+	}
+	if (cfg.NATSTLSCertFile == "") != (cfg.NATSTLSKeyFile == "") {
+		return errors.New("NATS_TLS_CERT_FILE and NATS_TLS_KEY_FILE must be set together")
+	}
+	return nil
 }
 
 func parseBoolEnv(key string, getenv func(string) string, def bool) (bool, error) {
