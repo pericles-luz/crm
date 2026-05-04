@@ -1,0 +1,255 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Webhook intake observability — outcome rates, ack latency, unpublished backlog, and per-tenant breakdown for post-HMAC outcomes. Source: docs/adr/0075-webhook-security.md §5. Owning task: SIN-62275.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Outcome rate (pre-HMAC, no tenant — F-9 invariant)",
+      "type": "timeseries",
+      "id": 1,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Pre-HMAC outcomes — emitted by webhook_received_total, which never carries tenant_id (ADR §2 D4 / F-9). Includes signature_invalid, unknown_token, revoked_token, parse_error, timestamp_*.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (channel, outcome) (rate(webhook_received_total[5m]))",
+          "legendFormat": "{{channel}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Outcome rate (post-HMAC, authenticated)",
+      "type": "timeseries",
+      "id": 2,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Post-HMAC outcomes — emitted by webhook_received_authenticated_total. tenant_id is aggregated away here; per-tenant breakdown is the dedicated panel below.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (channel, outcome) (rate(webhook_received_authenticated_total[5m]))",
+          "legendFormat": "{{channel}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Ack latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "id": 3,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Histogram quantiles of webhook_ack_duration_seconds per channel. p99 spikes that persist usually mean Postgres write contention or NATS publish slowness on the synchronous ack path.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "p50",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.50, sum by (channel, le) (rate(webhook_ack_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{channel}} p50"
+        },
+        {
+          "refId": "p95",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (channel, le) (rate(webhook_ack_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{channel}} p95"
+        },
+        {
+          "refId": "p99",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (channel, le) (rate(webhook_ack_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{channel}} p99"
+        }
+      ]
+    },
+    {
+      "title": "Unpublished backlog (raw_event.published_at IS NULL)",
+      "type": "timeseries",
+      "id": 4,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Gauge webhook_unpublished_event_count{channel}. Pages at >100 sustained 10min via WebhookUnpublishedBacklog. Steady non-zero indicates NATS / JetStream down or the reconciler stuck.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "webhook_unpublished_event_count",
+          "legendFormat": "{{channel}}"
+        }
+      ]
+    },
+    {
+      "title": "Per-tenant breakdown (authenticated outcomes only — F-9)",
+      "type": "timeseries",
+      "id": 5,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Per-tenant outcome rate using webhook_received_authenticated_total — the only metric that carries tenant_id. Pre-HMAC outcomes are intentionally absent so we never leak tenant association from an unauthenticated request (F-9).",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (channel, tenant_id, outcome) (rate(webhook_received_authenticated_total{tenant_id=~\"$tenant\"}[5m]))",
+          "legendFormat": "{{channel}} / {{tenant_id}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Idempotency conflicts (replay attempts on authenticated tenants)",
+      "type": "timeseries",
+      "id": 6,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "rate(webhook_idempotency_conflict_total[5m]) per channel/tenant. A small steady rate is normal (partner retries on transient errors). A burst signals replay attempts on a verified HMAC — investigate alongside WebhookReplayWindowViolationRate.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 27 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (channel, tenant_id) (rate(webhook_idempotency_conflict_total{tenant_id=~\"$tenant\"}[5m]))",
+          "legendFormat": "{{channel}} / {{tenant_id}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["webhook", "security", "adr-0075"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "regex": ""
+      },
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(webhook_received_authenticated_total, tenant_id)",
+        "query": { "query": "label_values(webhook_received_authenticated_total, tenant_id)", "refId": "tenant" },
+        "current": { "text": "All", "value": ".*", "selected": false },
+        "options": [],
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Webhook security",
+  "uid": "webhook-security",
+  "version": 1,
+  "weekStart": ""
+}
