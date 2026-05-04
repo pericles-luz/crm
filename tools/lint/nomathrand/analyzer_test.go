@@ -47,3 +47,11 @@ func TestAnalyzer_AllowsCryptoRand(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), a, "webhookpkg")
 }
 
+// TestAnalyzer_RejectsBareSuppressionMarker proves a `// nomathrand:ok`
+// without a reason does NOT silence the rule. The audit trail is the
+// reason this lint exists; bare suppressions defeat it.
+func TestAnalyzer_RejectsBareSuppressionMarker(t *testing.T) {
+	a := nomathrand.NewAnalyzer(fixtureConfig)
+	analysistest.Run(t, analysistest.TestData(), a, "emptyreasonpkg")
+}
+

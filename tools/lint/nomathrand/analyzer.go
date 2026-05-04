@@ -169,8 +169,12 @@ func isForbidden(path string) bool {
 }
 
 // suppressionLines returns the set of source-file line numbers carrying
-// a `// nomathrand:ok ...` marker. A diagnostic on the SAME line, or on
-// the line immediately following the marker, is silenced.
+// a `// nomathrand:ok <reason>` marker. A diagnostic on the SAME line,
+// or on the line immediately following the marker, is silenced.
+//
+// Markers MUST carry a non-empty reason after the suppress token. Bare
+// `// nomathrand:ok` markers do NOT silence the rule — empty
+// suppressions defeat the audit trail this lint exists to keep.
 func suppressionLines(fset *token.FileSet, f *ast.File) map[int]bool {
 	out := make(map[int]bool)
 	for _, cg := range f.Comments {
@@ -179,6 +183,10 @@ func suppressionLines(fset *token.FileSet, f *ast.File) map[int]bool {
 			text = strings.TrimSpace(strings.TrimPrefix(text, "/*"))
 			text = strings.TrimSpace(strings.TrimSuffix(text, "*/"))
 			if !strings.HasPrefix(text, suppressMarker) {
+				continue
+			}
+			rest := strings.TrimSpace(strings.TrimPrefix(text, suppressMarker))
+			if rest == "" {
 				continue
 			}
 			line := fset.Position(c.Pos()).Line

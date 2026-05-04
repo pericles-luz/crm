@@ -21,6 +21,12 @@ _, _ = io.ReadAll(r.Body)                          // nobodyreread:ok intentiona
 import _ "math/rand"                                // nomathrand:ok perf-test fixture, never linked into prod
 ```
 
+`nomathrand` rejects bare markers (no reason) — `// nomathrand:ok`
+alone does NOT silence the rule. Reviewers should treat the same
+"non-empty justification" expectation as a soft rule for
+`nobodyreread` and `nosecrets` too, even though those analyzers do
+not yet enforce it.
+
 The marker MUST sit on the same line as the diagnostic OR on the line
 immediately above. Real production overrides should include a one-line
 justification — these markers are reviewed in PR.
