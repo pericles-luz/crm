@@ -36,7 +36,7 @@ jobs:
           cache: true
 
       - name: analystest fixtures (positive + negative cases)
-        run: go test ./tools/lint/nobodyreread/... ./tools/lint/nosecrets/... -count=1 -race -cover
+        run: go test ./tools/lint/nobodyreread/... ./tools/lint/nomathrand/... ./tools/lint/nosecrets/... -count=1 -race -cover
 
       - name: build paperclip-lint vet tool
         run: go build -o ./bin/paperclip-lint ./cmd/paperclip-lint
@@ -59,11 +59,11 @@ jobs:
           fi
           go vet -vettool=$(pwd)/bin/paperclip-lint "${targets[@]}"
 
-      - name: enforce >=85% coverage on tools/lint/nobodyreread + tools/lint/nosecrets
+      - name: enforce >=85% coverage on tools/lint/{nobodyreread,nomathrand,nosecrets}
         run: |
-          go test ./tools/lint/nobodyreread/... ./tools/lint/nosecrets/... \
+          go test ./tools/lint/nobodyreread/... ./tools/lint/nomathrand/... ./tools/lint/nosecrets/... \
             -count=1 \
-            -coverpkg=./tools/lint/nobodyreread,./tools/lint/nosecrets \
+            -coverpkg=./tools/lint/nobodyreread,./tools/lint/nomathrand,./tools/lint/nosecrets \
             -coverprofile=coverage.out
           pct=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$3); print $3}')
           echo "coverage: ${pct}%"

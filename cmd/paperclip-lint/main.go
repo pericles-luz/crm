@@ -1,5 +1,6 @@
 // Command paperclip-lint bundles the project's custom go/analysis passes
-// (currently nobodyreread + nosecrets, ADR 0075) into a single binary.
+// (currently nobodyreread + nosecrets + nomathrand, ADR 0075) into a
+// single binary.
 //
 // Three usage shapes are supported:
 //
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/tools/go/analysis/multichecker"
 
 	"github.com/pericles-luz/crm/tools/lint/nobodyreread"
+	"github.com/pericles-luz/crm/tools/lint/nomathrand"
 	"github.com/pericles-luz/crm/tools/lint/nosecrets"
 )
 
@@ -30,6 +32,7 @@ func main() {
 	}
 	multichecker.Main(
 		nobodyreread.Analyzer,
+		nomathrand.Analyzer,
 		nosecrets.Analyzer,
 	)
 }
