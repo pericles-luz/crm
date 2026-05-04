@@ -438,17 +438,25 @@ func TestApply_ExtractorOk_FalseSkipsRule(t *testing.T) {
 
 // --- KeyExtractor unit tests ---
 
+// TestIPKey asserts the default-deny contract of the package-level
+// IPKey symbol after SIN-62287. The two "x-forwarded-for ..." cases
+// previously asserted that IPKey trusted X-Forwarded-For unconditionally
+// (the regression of the SIN-62167 / SIN-62177 policy). They now assert
+// the corrected default: with no TrustedProxies configured, IPKey MUST
+// ignore the header and bucket per peer (RemoteAddr). The trusted-proxy
+// and rightmost-hop scenarios live in
+// TestIPKeyFrom_TrustedProxyXFFRightmost / TestIPKey_DefaultDeniesXFF.
 func TestIPKey(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name       string
-		xff        string
-		remote     string
-		want       string
-		wantOK     bool
+		name   string
+		xff    string
+		remote string
+		want   string
+		wantOK bool
 	}{
-		{"x-forwarded-for first hop", "203.0.113.10, 10.0.0.1", "10.0.0.1:80", "203.0.113.10", true},
-		{"x-forwarded-for single", "203.0.113.10", "10.0.0.1:80", "203.0.113.10", true},
+		{"x-forwarded-for ignored without trusted proxies (multi-hop)", "203.0.113.10, 10.0.0.1", "10.0.0.1:80", "10.0.0.1", true},
+		{"x-forwarded-for ignored without trusted proxies (single hop)", "203.0.113.10", "10.0.0.1:80", "10.0.0.1", true},
 		{"remoteaddr with port", "", "203.0.113.10:80", "203.0.113.10", true},
 		{"remoteaddr no port", "", "203.0.113.10", "203.0.113.10", true},
 		{"missing both", "", "", "", false},
@@ -490,6 +498,114 @@ func TestFormFieldKey_NormalisesAndSkips(t *testing.T) {
 			t.Fatal("missing email field must yield ok=false")
 		}
 	})
+}
+
+// TestFormFieldKey_IgnoresQueryString is the SIN-62286 regression: an
+// empty-body POST whose target field lives in the URL query string MUST
+// be ignored by the extractor, so an attacker cannot trip the rate-limit
+// bucket of an arbitrary victim email without sending a real form body.
+func TestFormFieldKey_IgnoresQueryString(t *testing.T) {
+	t.Parallel()
+	extract := middleware.FormFieldKey("email")
+
+	t.Run("post with empty body and query field skips", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodPost, "/login?email=victim%40example.com", nil)
+		_, ok := extract(req)
+		if ok {
+			t.Fatal("query-string-only field MUST NOT be picked up; otherwise pre-auth lockout DoS is possible (SIN-62286)")
+		}
+	})
+
+	t.Run("post with body present takes body, not query", func(t *testing.T) {
+		t.Parallel()
+		// Body says realuser; query string says attacker bait.
+		req := httptest.NewRequest(http.MethodPost, "/login?email=spoof%40example.com",
+			strings.NewReader("email=Real%40Example.com"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		got, ok := extract(req)
+		if !ok {
+			t.Fatal("body field present must yield ok=true")
+		}
+		if got != "real@example.com" {
+			t.Fatalf("FormFieldKey = %q; want body value %q (NOT the query-string value)", got, "real@example.com")
+		}
+	})
+
+	t.Run("get request with query field skips", func(t *testing.T) {
+		t.Parallel()
+		// PostFormValue only consults the body for POST/PUT/PATCH; GET
+		// returns "" → ok=false. Email-keyed rules are wired only on
+		// POST endpoints anyway.
+		req := httptest.NewRequest(http.MethodGet, "/login?email=victim%40example.com", nil)
+		_, ok := extract(req)
+		if ok {
+			t.Fatal("GET requests must not feed an email-keyed bucket via the query string")
+		}
+	})
+}
+
+// TestApply_EmptyBodyQueryStringDoesNotIncrementEmailBucket is the
+// SIN-62286 integration regression: 50 empty-body POSTs whose only
+// "email" lives in the URL query string MUST NOT count against the
+// per-email bucket. A 51st request that *does* submit the email in the
+// body must still be allowed (10/h budget intact).
+func TestApply_EmptyBodyQueryStringDoesNotIncrementEmailBucket(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClock(time.Unix(1_700_000_000, 0))
+	lim := memory.New(memory.WithClock(clock.Now))
+	rec := metrics.NewCounter()
+	mw := middleware.Apply(lim, []middleware.Rule{
+		{
+			Endpoint:   "POST /login",
+			Bucket:     "email",
+			Limit:      ratelimit.Limit{Window: time.Hour, Max: 10},
+			Key:        middleware.FormFieldKey("email"),
+			FailClosed: true,
+		},
+	}, middleware.Config{Now: clock.Now, Metrics: rec, Logger: discardLogger()})
+	h := mw(nextOK)
+
+	// 50 empty-body forgeries — many times the 10/h budget. None must
+	// land on the email bucket.
+	for i := 0; i < 50; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/login?email=victim%40example.com", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("forgery %d: status = %d, want 200 (rule must be skipped, not denied)", i, w.Code)
+		}
+	}
+	if got := rec.AllowedCount("POST /login", "email"); got != 0 {
+		t.Fatalf("query-string forgeries leaked into email bucket: Allowed=%d, want 0", got)
+	}
+	if got := rec.DeniedCount("POST /login", "email"); got != 0 {
+		t.Fatalf("query-string forgeries triggered Denied=%d on email bucket; want 0", got)
+	}
+
+	// Now hit the same endpoint with the email *in the body*. The full
+	// 10/h budget must still be available.
+	for i := 1; i <= 10; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/login?email=spoof%40example.com",
+			strings.NewReader("email=victim%40example.com"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("legitimate body request %d: status = %d, want 200", i, w.Code)
+		}
+	}
+	// 11th body request must trip 429 — confirms the bucket is intact
+	// and the previous query-string traffic did not steal budget from
+	// it.
+	req := httptest.NewRequest(http.MethodPost, "/login",
+		strings.NewReader("email=victim%40example.com"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("11th body request status = %d, want 429 (bucket integrity check)", w.Code)
+	}
 }
 
 func TestHeaderKey(t *testing.T) {

@@ -31,6 +31,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -277,35 +278,168 @@ func logUnavailable(ctx context.Context, logger *slog.Logger, hasher logHasher, 
 	)
 }
 
-// IPKey extracts the request's IP address. It prefers the first hop in the
-// X-Forwarded-For chain (Caddy or any other trusted proxy is responsible
-// for sanitising the header before we see it) and falls back to
-// RemoteAddr.
+// IPKeyOpts configures the IP extractor returned by IPKeyFrom.
+//
+// TrustedProxies is the allow-list of proxy peer addresses we are willing
+// to consult X-Forwarded-For / X-Real-IP for. The check is against the
+// host parsed out of r.RemoteAddr (the immediate TCP peer). When empty,
+// the extractor never reads forwarded-IP headers — the policy is
+// default-deny, mirroring the SIN-62167 / SIN-62177 decision for the
+// legacy clientIP helper. cmd/server is responsible for opting in by
+// passing the production CIDR list at wiring time (typically the
+// front-door reverse-proxy network: Caddy peer, internal load balancer
+// CIDRs).
+type IPKeyOpts struct {
+	TrustedProxies []netip.Prefix
+}
+
+// IPKey extracts the request's IP address with X-Forwarded-For default-
+// denied. See IPKeyFrom for the full contract; this is IPKeyFrom called
+// with a zero-value IPKeyOpts, so it never trusts XFF / X-Real-IP.
+//
+// Production wiring (cmd/server) must replace this default with
+// IPKeyFrom(IPKeyOpts{TrustedProxies: <production CIDRs>}). The
+// per-request, IP-keyed buckets in config/ratelimit.yaml ("POST /login"
+// ip and "/api/*" ip) collapse to bucketing per Caddy peer otherwise.
+//
+// Why default-deny: trusting XFF unconditionally lets an anonymous
+// remote attacker bypass every IP-keyed bucket by rotating the header
+// value per request — the original defect class fixed in SIN-62167 and
+// codified in SIN-62177. SIN-62287 re-applies that policy here.
 func IPKey(r *http.Request) (string, bool) {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i]), true
+	return ipKeyFromCompiled(r, nil)
+}
+
+// IPKeyFrom returns a KeyExtractor that consults forwarded-IP headers
+// only when r.RemoteAddr's host is contained in opts.TrustedProxies.
+//
+// Resolution order, when the peer is trusted:
+//  1. The rightmost entry of X-Forwarded-For — that is the only entry
+//     that survives a trusted proxy's rewrite of the header (RFC 7239,
+//     Caddy and nginx convention). The leftmost entry is attacker-
+//     controlled when XFF arrives on the wire.
+//  2. X-Real-IP, as a single-value fallback emitted by some proxies.
+//  3. The peer's own RemoteAddr host.
+//
+// When the peer is NOT trusted (or TrustedProxies is empty), the
+// extractor ignores both headers and returns RemoteAddr's host. ok=false
+// only when there is no usable address at all (RemoteAddr empty AND
+// every other source unparseable).
+func IPKeyFrom(opts IPKeyOpts) KeyExtractor {
+	prefixes := append([]netip.Prefix(nil), opts.TrustedProxies...)
+	return func(r *http.Request) (string, bool) {
+		return ipKeyFromCompiled(r, prefixes)
+	}
+}
+
+func ipKeyFromCompiled(r *http.Request, trusted []netip.Prefix) (string, bool) {
+	peer := remoteAddrHost(r)
+	if peer != "" && peerIsTrusted(peer, trusted) {
+		if v := rightmostXFF(r.Header.Get("X-Forwarded-For")); v != "" {
+			return v, true
 		}
-		return strings.TrimSpace(xff), true
+		if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
+			return v, true
+		}
+	}
+	if peer != "" {
+		return peer, true
 	}
 	if r.RemoteAddr == "" {
 		return "", false
 	}
-	if host, _, err := splitHostPort(r.RemoteAddr); err == nil && host != "" {
-		return host, true
-	}
 	return r.RemoteAddr, true
 }
 
-// FormFieldKey extracts a form field, normalised to lowercase + trimmed. It
-// returns ok=false if the field is missing/empty so the rule is skipped
-// (the upstream handler will reject the empty value with a 4xx).
+// remoteAddrHost extracts the host portion of r.RemoteAddr. It honours
+// the bracketed-IPv6 form (e.g. "[2001:db8::1]:443" → "2001:db8::1") and
+// tolerates RemoteAddr values that have no port (some test transports
+// populate just an IP).
+func remoteAddrHost(r *http.Request) string {
+	if r.RemoteAddr == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+		return host
+	}
+	// No port (or unparseable host:port). Strip enclosing brackets if
+	// present so a bracketed IPv6 literal still parses cleanly downstream.
+	addr := r.RemoteAddr
+	if len(addr) >= 2 && addr[0] == '[' && addr[len(addr)-1] == ']' {
+		return addr[1 : len(addr)-1]
+	}
+	return addr
+}
+
+// peerIsTrusted reports whether host (parsed as an IP) sits in any of
+// the configured TrustedProxies CIDRs. A non-IP host (e.g. unix socket
+// or a hostname) is never trusted, by construction.
+func peerIsTrusted(host string, trusted []netip.Prefix) bool {
+	if len(trusted) == 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range trusted {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// rightmostXFF returns the last (rightmost) hop in an X-Forwarded-For
+// header, trimmed. Empty input returns the empty string. The rightmost
+// entry is the only one that survives a trusted proxy's rewrite — every
+// hop further left was supplied by something we are not authoritative
+// over.
+func rightmostXFF(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	if i := strings.LastIndexByte(xff, ','); i >= 0 {
+		return strings.TrimSpace(xff[i+1:])
+	}
+	return strings.TrimSpace(xff)
+}
+
+// FormFieldKey extracts a form field from the request body only,
+// normalised to lowercase + trimmed. It returns ok=false if the field is
+// missing/empty so the rule is skipped (the upstream handler will reject
+// the empty value with a 4xx).
+//
+// Body-only by design (SIN-62286). We use r.PostFormValue, not
+// r.FormValue, because r.FormValue merges the URL query string with the
+// parsed body — that lets an unauthenticated attacker trip an arbitrary
+// victim's per-email bucket with empty-body forgeries such as
+// `POST /login?email=victim%40example.com`. Query-string sourced values
+// MUST NOT increment email-keyed buckets. For POST/PUT/PATCH,
+// r.PostFormValue consults only the body, which is the desired
+// behaviour for the email rate-limit rules in config/ratelimit.yaml
+// (`POST /login` and `POST /password/reset`).
+//
+// Body-consumption gotcha. r.PostFormValue triggers r.ParseMultipartForm
+// (which calls r.ParseForm), and both read and consume r.Body for
+// application/x-www-form-urlencoded and multipart/form-data requests.
+// After this middleware runs, downstream handlers that try to read the
+// raw body (e.g. json.NewDecoder(r.Body)) will see EOF. Recommended
+// pattern for endpoints that need this rate-limit AND a non-form body:
+// either (a) buffer-and-restore r.Body before this middleware (e.g.
+// drain to a bytes.Buffer and re-attach via io.NopCloser), or (b) move
+// the endpoint to application/x-www-form-urlencoded so the downstream
+// handler reads the same parsed form via r.PostForm. The parsed values
+// remain available on r.PostForm/r.Form after the body is consumed, so
+// handlers that opt into form encoding pay no extra cost.
 func FormFieldKey(name string) KeyExtractor {
 	return func(r *http.Request) (string, bool) {
-		// We do not call r.ParseForm directly because some endpoints
-		// stream JSON; FormValue is the read-only path that handles
-		// both POST forms and query strings.
-		if v := strings.TrimSpace(r.FormValue(name)); v != "" {
+		// PostFormValue ignores the URL query string for POST/PUT/PATCH;
+		// for other methods it returns the empty string, which yields
+		// ok=false here. That is the correct behaviour — email-keyed
+		// rate-limit rules only target body-bearing methods.
+		if v := strings.TrimSpace(r.PostFormValue(name)); v != "" {
 			return strings.ToLower(v), true
 		}
 		return "", false
@@ -348,25 +482,4 @@ func ContextValueKey(ctxKey any) KeyExtractor {
 		}
 		return s, true
 	}
-}
-
-// splitHostPort wraps net.SplitHostPort so RemoteAddr values produced by
-// odd transports — bare IPv4 ("203.0.113.10"), bare IPv6 ("::1"), unix
-// domain sockets — fall back to returning the raw address as the host
-// rather than mangling it. Real-shaped values (host:port,
-// "[2001:db8::1]:80") behave like the stdlib helper.
-func splitHostPort(addr string) (string, string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err == nil {
-		return host, port, nil
-	}
-	var addrErr *net.AddrError
-	if errors.As(err, &addrErr) {
-		// Missing port, too many colons (bare IPv6), etc.: treat the
-		// whole input as the host. This is observably stricter for
-		// IPv6 — every bracket-less address shares one bucket — but
-		// avoids the previous behaviour of emitting "::" as the host.
-		return addr, "", nil
-	}
-	return "", "", err
 }
