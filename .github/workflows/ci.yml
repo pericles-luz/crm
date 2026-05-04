@@ -1,13 +1,13 @@
-# CI for the multi-tenant CRM — SIN-62232.
+# CI for the multi-tenant CRM — SIN-62192 Fase 0 / SIN-62210 (PR 8/12).
 #
-# Two jobs: lint (fast, no DB) and test (real Postgres 16). The test job
-# brings up a postgres:16 service container and exposes its DSN as
-# TEST_DATABASE_URL so internal/adapter/db/postgres/testpg attaches to it
-# instead of spawning an ephemeral cluster locally.
+# Four jobs gate every push to main and every PR:
+#   - lint           go vet + staticcheck + gofmt + the SIN-62232 notenant analyzer
+#   - test           go test -race -coverprofile=cov.out against postgres/redis/nats
+#   - coverage-gate  scripts/coverage-check.sh — fail if total stmt coverage < 85 %
+#   - build          go build ./cmd/server
 #
-# This is the minimum CI needed to gate the SIN-62232 deliverables; it does
-# not yet include staticcheck (PR8 per the Makefile help) or coverage
-# uploads (those land alongside SIN-62192 Phase 0 Bootstrap).
+# No secrets are required for any job. Secrets land in PR9 (CD stg) only — if a
+# job here ever references a secret it should fail by design.
 
 name: ci
 
@@ -15,6 +15,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -29,9 +30,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: go vet
+      - name: gofmt -l .
+        run: gofmt -l . | tee /dev/stderr | (! read)
+      - name: go vet ./...
         run: go vet ./...
-      - name: build notenant analyzer
+      - name: install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      - name: staticcheck ./...
+        run: "$(go env GOPATH)/bin/staticcheck ./..."
+      - name: build notenant analyzer (SIN-62232 / ADR 0071)
         run: go build -o bin/notenant ./tools/lint/notenant/cmd/notenant
       - name: notenant analyzer (./internal/...)
         run: go vet -vettool=$(pwd)/bin/notenant ./internal/...
@@ -43,10 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16-alpine
         env:
-          POSTGRES_PASSWORD: ci-superuser
           POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-superuser
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -55,27 +62,71 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      nats:
+        image: nats:2-alpine
+        ports:
+          - 4222:4222
+          - 8222:8222
+        options: >-
+          --health-cmd "wget -q -O - http://localhost:8222/healthz"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     env:
-      # testpg honours TEST_DATABASE_URL when set; otherwise it spawns its own
-      # cluster via pg_ctl. The keyword DSN format matches what the harness
-      # parses with parseHostPort.
+      # testpg attaches to this DSN instead of spawning its own pg_ctl cluster.
       TEST_DATABASE_URL: "host=127.0.0.1 port=5432 user=postgres password=ci-superuser dbname=postgres sslmode=disable"
+      TEST_REDIS_URL: "redis://127.0.0.1:6379/0"
+      TEST_NATS_URL: "nats://127.0.0.1:4222"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: go test (unit + integration)
-        run: |
-          go test ./... -race -count=1 \
-            -coverpkg=./internal/adapter/db/postgres \
-            -coverprofile=coverage.out
-      - name: enforce >=85% coverage on internal/adapter/db/postgres
-        run: |
-          pct=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$3); print $3}')
-          echo "coverage: ${pct}%"
-          awk -v p="$pct" 'BEGIN { exit !(p+0 >= 85.0) }' || {
-            echo "coverage ${pct}% below 85% threshold (SIN-62221 quality bar)"
-            exit 1
-          }
+      - name: go test -race -coverprofile=cov.out ./...
+        run: go test -race -count=1 -coverprofile=cov.out ./...
+      - name: upload coverage profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: cov.out
+          path: cov.out
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage-gate:
+    name: coverage-gate
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: download coverage profile
+        uses: actions/download-artifact@v4
+        with:
+          name: cov.out
+      - name: enforce >=85% total coverage
+        run: scripts/coverage-check.sh cov.out 85
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go build ./cmd/server
+        run: go build ./cmd/server
