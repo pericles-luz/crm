@@ -232,15 +232,40 @@ func IPKey(r *http.Request) (string, bool) {
 	return r.RemoteAddr, true
 }
 
-// FormFieldKey extracts a form field, normalised to lowercase + trimmed. It
-// returns ok=false if the field is missing/empty so the rule is skipped
-// (the upstream handler will reject the empty value with a 4xx).
+// FormFieldKey extracts a form field from the request body only,
+// normalised to lowercase + trimmed. It returns ok=false if the field is
+// missing/empty so the rule is skipped (the upstream handler will reject
+// the empty value with a 4xx).
+//
+// Body-only by design (SIN-62286). We use r.PostFormValue, not
+// r.FormValue, because r.FormValue merges the URL query string with the
+// parsed body — that lets an unauthenticated attacker trip an arbitrary
+// victim's per-email bucket with empty-body forgeries such as
+// `POST /login?email=victim%40example.com`. Query-string sourced values
+// MUST NOT increment email-keyed buckets. For POST/PUT/PATCH,
+// r.PostFormValue consults only the body, which is the desired
+// behaviour for the email rate-limit rules in config/ratelimit.yaml
+// (`POST /login` and `POST /password/reset`).
+//
+// Body-consumption gotcha. r.PostFormValue triggers r.ParseMultipartForm
+// (which calls r.ParseForm), and both read and consume r.Body for
+// application/x-www-form-urlencoded and multipart/form-data requests.
+// After this middleware runs, downstream handlers that try to read the
+// raw body (e.g. json.NewDecoder(r.Body)) will see EOF. Recommended
+// pattern for endpoints that need this rate-limit AND a non-form body:
+// either (a) buffer-and-restore r.Body before this middleware (e.g.
+// drain to a bytes.Buffer and re-attach via io.NopCloser), or (b) move
+// the endpoint to application/x-www-form-urlencoded so the downstream
+// handler reads the same parsed form via r.PostForm. The parsed values
+// remain available on r.PostForm/r.Form after the body is consumed, so
+// handlers that opt into form encoding pay no extra cost.
 func FormFieldKey(name string) KeyExtractor {
 	return func(r *http.Request) (string, bool) {
-		// We do not call r.ParseForm directly because some endpoints
-		// stream JSON; FormValue is the read-only path that handles
-		// both POST forms and query strings.
-		if v := strings.TrimSpace(r.FormValue(name)); v != "" {
+		// PostFormValue ignores the URL query string for POST/PUT/PATCH;
+		// for other methods it returns the empty string, which yields
+		// ok=false here. That is the correct behaviour — email-keyed
+		// rate-limit rules only target body-bearing methods.
+		if v := strings.TrimSpace(r.PostFormValue(name)); v != "" {
 			return strings.ToLower(v), true
 		}
 		return "", false
