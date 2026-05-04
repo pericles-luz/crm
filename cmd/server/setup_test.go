@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	pgstore "github.com/pericles-luz/crm/internal/adapter/store/postgres"
+	"github.com/pericles-luz/crm/internal/webhook"
 )
 
 // fakePool is a no-op pgstore.PgxConn so buildStack can construct stores
@@ -39,11 +41,27 @@ func fakePoolOpener(_ context.Context, _ string) (pgstore.PgxConn, func(), error
 	return fakePool{}, func() { closed = true; _ = closed }, nil
 }
 
+// fakePublisher implements webhook.EventPublisher with a counted no-op
+// so tests can verify reconciler/handler wire-up without dialing NATS.
+type fakePublisher struct {
+	calls atomic.Int64
+}
+
+func (p *fakePublisher) Publish(_ context.Context, _ [16]byte, _ webhook.TenantID, _ string, _ []byte, _ map[string][]string) error {
+	p.calls.Add(1)
+	return nil
+}
+
+func fakePublisherFactory(_ context.Context, _ config, _ *slog.Logger) (webhook.EventPublisher, func(), error) {
+	closed := false
+	return &fakePublisher{}, func() { closed = true; _ = closed }, nil
+}
+
 func TestBuildStack_FlagOff_StubHandlerReturns200(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	stack, err := buildStack(context.Background(), cfg, logger, nil)
+	stack, err := buildStack(context.Background(), cfg, logger, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStack: %v", err)
 	}
@@ -83,10 +101,8 @@ func TestBuildStack_FlagOn_BuildsRealService(t *testing.T) {
 	cfg.WebhookV2Enabled = true
 	cfg.MetaAppSecret = "topsecret"
 	cfg.DatabaseURL = "postgres://ignored"
-	cfg.NATSValidateStream = true
-	cfg.NATSStreamDuplicatesWindow = time.Hour
 
-	stack, err := buildStack(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), fakePoolOpener)
+	stack, err := buildStack(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), fakePoolOpener, fakePublisherFactory)
 	if err != nil {
 		t.Fatalf("buildStack: %v", err)
 	}
@@ -157,37 +173,21 @@ func TestBuildStack_FlagOn_BuildsRealService(t *testing.T) {
 	}
 }
 
-func TestBuildStack_FlagOn_FailsFastWhenDuplicatesWindowTooSmall(t *testing.T) {
+func TestBuildStack_FlagOn_PublisherFactoryError(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
 	cfg.WebhookV2Enabled = true
 	cfg.MetaAppSecret = "x"
 	cfg.DatabaseURL = "postgres://x"
-	cfg.NATSStreamDuplicatesWindow = 30 * time.Minute // < 1h, F-14 violation
 
-	_, err := buildStack(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), fakePoolOpener)
-	if err == nil {
-		t.Fatal("expected fail-fast on Duplicates<1h")
+	pubErr := errors.New("nats publisher failed")
+	failingPublisher := func(context.Context, config, *slog.Logger) (webhook.EventPublisher, func(), error) {
+		return nil, nil, pubErr
 	}
-	if !strings.Contains(err.Error(), "Duplicates") {
-		t.Fatalf("error message missing Duplicates context: %v", err)
+	_, err := buildStack(context.Background(), cfg, nil, fakePoolOpener, failingPublisher)
+	if !errors.Is(err, pubErr) {
+		t.Fatalf("err = %v, want pubErr", err)
 	}
-}
-
-func TestBuildStack_FlagOn_SkipsValidationWhenDisabled(t *testing.T) {
-	t.Parallel()
-	cfg := defaultConfig()
-	cfg.WebhookV2Enabled = true
-	cfg.MetaAppSecret = "x"
-	cfg.DatabaseURL = "postgres://x"
-	cfg.NATSValidateStream = false
-	cfg.NATSStreamDuplicatesWindow = time.Second // would fail if validated
-
-	stack, err := buildStack(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), fakePoolOpener)
-	if err != nil {
-		t.Fatalf("buildStack: %v", err)
-	}
-	defer stack.Close()
 }
 
 func TestBuildStack_FlagOn_RejectsBadMetaChannel(t *testing.T) {
@@ -198,7 +198,7 @@ func TestBuildStack_FlagOn_RejectsBadMetaChannel(t *testing.T) {
 	cfg.DatabaseURL = "postgres://x"
 	cfg.MetaChannels = []string{"telegram"} // unsupported by Meta adapter
 
-	_, err := buildStack(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), fakePoolOpener)
+	_, err := buildStack(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), fakePoolOpener, fakePublisherFactory)
 	if err == nil {
 		t.Fatal("expected error for unsupported channel")
 	}
@@ -218,7 +218,7 @@ func TestBuildStack_FlagOn_PoolOpenerError(t *testing.T) {
 	opener := func(context.Context, string) (pgstore.PgxConn, func(), error) {
 		return nil, nil, openErr
 	}
-	_, err := buildStack(context.Background(), cfg, nil, opener)
+	_, err := buildStack(context.Background(), cfg, nil, opener, fakePublisherFactory)
 	if !errors.Is(err, openErr) {
 		t.Fatalf("err = %v, want openErr", err)
 	}
@@ -236,5 +236,91 @@ func TestDefaultPoolOpener_BadURLReturnsError(t *testing.T) {
 	_, _, err := defaultPoolOpener(context.Background(), "not://a/valid/postgres/url")
 	if err == nil {
 		t.Fatal("expected error from defaultPoolOpener with bad URL")
+	}
+}
+
+func TestDefaultPublisherFactory_RequiresNATSURL(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.NATSURL = ""
+	_, _, err := defaultPublisherFactory(context.Background(), cfg, nil)
+	if err == nil {
+		t.Fatal("expected error when NATS URL is empty")
+	}
+}
+
+func TestDefaultPublisherFactory_BadTLSCAFileReturnsError(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.NATSURL = "nats://localhost:4222"
+	cfg.NATSTLSCAFile = "/nonexistent/ca.pem"
+	_, _, err := defaultPublisherFactory(context.Background(), cfg, nil)
+	if err == nil {
+		t.Fatal("expected error from missing CA file")
+	}
+	if !strings.Contains(err.Error(), "tls") {
+		t.Fatalf("error should mention tls: %v", err)
+	}
+}
+
+func TestDefaultPublisherFactory_DialErrorSurfaces(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	// Reserved TEST-NET-1 with a closed port; dial should fail fast.
+	cfg.NATSURL = "nats://192.0.2.1:4222"
+	cfg.NATSReconnectWait = 10 * time.Millisecond
+	cfg.NATSMaxReconnects = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, _, err := defaultPublisherFactory(ctx, cfg, nil)
+	if err == nil {
+		t.Fatal("expected dial error to surface")
+	}
+}
+
+func TestChainClosers_RunsInOrderAndSkipsNil(t *testing.T) {
+	t.Parallel()
+	if got := chainClosers(); got != nil {
+		t.Fatal("chainClosers() = non-nil for empty input")
+	}
+	var order []int
+	c := chainClosers(func() { order = append(order, 1) }, nil, func() { order = append(order, 2) })
+	c()
+	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
+		t.Fatalf("order = %v", order)
+	}
+}
+
+func TestLoadNATSTLSConfig_NilWhenAllEmpty(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	tlsCfg, err := loadNATSTLSConfig(cfg)
+	if err != nil {
+		t.Fatalf("loadNATSTLSConfig: %v", err)
+	}
+	if tlsCfg != nil {
+		t.Fatalf("tlsCfg = %+v, want nil", tlsCfg)
+	}
+}
+
+func TestLoadNATSTLSConfig_ServerNameOnly(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.NATSTLSServerName = "nats.example.com"
+	tlsCfg, err := loadNATSTLSConfig(cfg)
+	if err != nil {
+		t.Fatalf("loadNATSTLSConfig: %v", err)
+	}
+	if tlsCfg == nil || tlsCfg.ServerName != "nats.example.com" {
+		t.Fatalf("tlsCfg = %+v", tlsCfg)
+	}
+}
+
+func TestLoadNATSTLSConfig_BadCAFile(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.NATSTLSCAFile = "/no/such/path"
+	if _, err := loadNATSTLSConfig(cfg); err == nil {
+		t.Fatal("expected error from missing CA")
 	}
 }
