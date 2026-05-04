@@ -109,6 +109,38 @@ func TestExecute_ReturnsOneOnRunError(t *testing.T) {
 	}
 }
 
+func TestExecute_ReturnsOneOnConfigError(t *testing.T) {
+	t.Parallel()
+	getenv := func(k string) string {
+		if k == "WEBHOOK_SECURITY_V2_ENABLED" {
+			return "totally-not-a-bool"
+		}
+		return ""
+	}
+	if code := execute(context.Background(), getenv); code != 1 {
+		t.Fatalf("execute returned %d on bad config, want 1", code)
+	}
+}
+
+func TestExecute_ReturnsOneOnStackBuildError(t *testing.T) {
+	t.Parallel()
+	getenv := func(k string) string {
+		switch k {
+		case "WEBHOOK_SECURITY_V2_ENABLED":
+			return "true"
+		case "META_APP_SECRET":
+			return "topsecret"
+		case "DATABASE_URL":
+			// Not a valid postgres URL — defaultPoolOpener fails fast.
+			return "::not-a-pg-url::"
+		}
+		return ""
+	}
+	if code := execute(context.Background(), getenv); code != 1 {
+		t.Fatalf("execute returned %d on stack build error, want 1", code)
+	}
+}
+
 func freePort(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
