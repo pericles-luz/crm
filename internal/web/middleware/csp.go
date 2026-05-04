@@ -20,6 +20,13 @@ type cspNonceCtxKey struct{}
 //
 // Style-src keeps 'unsafe-inline' as documented technical debt (ADR 0082 §3,
 // review target Q4 2026).
+//
+// Launch-readiness gates (SIN-62288 items 7 & 8):
+//   - The "https://static.crm.exemplo.com" img-src host is a placeholder.
+//     Replace with the production CDN host (or promote to a config knob)
+//     before exiting beta.
+//   - This template emits no `report-to` / `report-uri`. Wire one once a
+//     reporting endpoint or third-party CSP collector is decided.
 const cspHeaderTemplate = "default-src 'self'; " +
 	"script-src 'self' 'nonce-{nonce}'; " +
 	"style-src 'self' 'unsafe-inline'; " +
@@ -54,6 +61,15 @@ func CSPNonce(ctx context.Context) string {
 //   - Stashes the nonce in r.Context() for templates via CSPNonce.
 //   - Writes the Content-Security-Policy header with the nonce substituted
 //     into the canonical template (ADR 0082 §1).
+//   - Sets Cache-Control: no-store so an HTML response that bakes the
+//     per-request nonce into a <script> tag cannot be cached by an
+//     intermediary and replayed across users with a stale nonce. ADR 0082
+//     defers most cache headers to Caddy, but the protection here is
+//     defence-in-depth: as long as the CSP middleware runs the response
+//     is uncacheable regardless of upstream config. SIN-62285 will add a
+//     mirroring `Cache-Control: no-store` on Caddy for HTML routes; the
+//     two together close the gap when Caddy is bypassed (direct hits to
+//     the app port, internal probes, smoke checks).
 //
 // The middleware uses crypto/rand directly so a depleted entropy source
 // surfaces as an error rather than a silently-weak nonce: if rand.Read
@@ -78,6 +94,11 @@ func cspWith(randSource func([]byte) (int, error)) func(http.Handler) http.Handl
 			nonce := base64.RawURLEncoding.EncodeToString(buf)
 			header := strings.Replace(cspHeaderTemplate, "{nonce}", nonce, 1)
 			w.Header().Set("Content-Security-Policy", header)
+			// Per-request nonces void caching: a cached HTML body would
+			// re-serve a stale nonce that no longer matches the header,
+			// breaking script execution and (worse) blanking out the
+			// XSS protection. See SIN-62288 item 6.
+			w.Header().Set("Cache-Control", "no-store")
 
 			ctx := context.WithValue(r.Context(), cspNonceCtxKey{}, nonce)
 			next.ServeHTTP(w, r.WithContext(ctx))

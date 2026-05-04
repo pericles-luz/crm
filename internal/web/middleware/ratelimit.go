@@ -10,12 +10,18 @@
 //     tripped, only the retry budget.
 //   - On limiter failure (Redis down, etc.) each Rule decides between
 //     fail-closed (503) and fail-open (allow + X-RateLimit-Bypass header).
-//   - Logging uses log/slog with the bucket value hashed (SHA-256 / 16 hex)
-//     so we never persist PII in our log pipeline.
+//   - Logging uses log/slog with the bucket value HMAC-hashed (HMAC-SHA256
+//     truncated to 8 bytes / 16 hex chars) using a process secret. The
+//     resulting digest is reversible *only* by an attacker who already
+//     holds the server secret; treat it as pseudonymised PII subject to
+//     the same retention/deletion policies (LGPD), not as fully anonymous
+//     data. Secret rotation is governed by ADR 0073 (planned, SIN-62199).
 package middleware
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,6 +38,25 @@ import (
 	"github.com/pericles-luz/crm/internal/ratelimit"
 	"github.com/pericles-luz/crm/internal/ratelimit/metrics"
 )
+
+// keyDelimiter separates the endpoint, bucket and value segments inside a
+// limiter key. NUL is unreachable in HTTP header field values, e-mail
+// local-parts, and IP textual forms, so it cannot collide with operator-
+// or attacker-controlled content. See SIN-62288 item 4.
+const keyDelimiter = "\x00"
+
+// maxHeaderKeyValueLen caps how many bytes HeaderKey accepts from an
+// inbound header before declaring the bucket value invalid. Without a cap
+// a pre-auth attacker can spam millions of distinct header values to
+// inflate Redis bucket cardinality (memory pressure / ops cost). 256 is
+// well above any legitimate session ID, JWT or correlation ID we issue.
+// See SIN-62288 item 2.
+const maxHeaderKeyValueLen = 256
+
+// logHashSecretBytes is the byte length of the per-process HMAC key used
+// to hash bucket values for structured logs. 32 bytes (256 bits) matches
+// the SHA-256 block-equivalent strength.
+const logHashSecretBytes = 32
 
 // KeyExtractor pulls the bucket value out of an inbound request. Returning
 // ok=false skips the rule for this request (e.g. an email bucket on a
@@ -73,6 +99,46 @@ type Config struct {
 	// Metrics is the Recorder for the three Prometheus counters
 	// described in ADR 0081 §6. nil → no-op.
 	Metrics metrics.Recorder
+	// LogHashSecret keys the HMAC used to derive bucket_value_hash. When
+	// empty Apply generates a 32-byte random secret at construction
+	// time, scoped to the process. Production deployments should supply
+	// a stable secret loaded from the environment so log entries are
+	// correlatable across instances; rotation is governed by ADR 0073
+	// (planned, SIN-62199).
+	LogHashSecret []byte
+}
+
+// logHasher hashes bucket values for structured logs using HMAC-SHA256
+// keyed by a process-scoped or operator-supplied secret. The 8-byte
+// truncated digest is reversible only by attackers who already hold the
+// secret; the goal is pseudonymisation, not anonymisation.
+type logHasher struct {
+	secret []byte
+}
+
+func (h logHasher) hash(value string) string {
+	mac := hmac.New(sha256.New, h.secret)
+	mac.Write([]byte(value))
+	sum := mac.Sum(nil)
+	return hex.EncodeToString(sum[:8])
+}
+
+// newLogHasher returns a logHasher seeded with secret, or with 32 random
+// bytes when secret is empty. crypto/rand failure during construction is
+// fatal so the middleware never falls back to a predictable digest.
+func newLogHasher(secret []byte) logHasher {
+	if len(secret) > 0 {
+		// Defensive copy so callers can scrub the source slice without
+		// changing observed log digests.
+		buf := make([]byte, len(secret))
+		copy(buf, secret)
+		return logHasher{secret: buf}
+	}
+	buf := make([]byte, logHashSecretBytes)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("ratelimit middleware: generate log hash secret: %v", err))
+	}
+	return logHasher{secret: buf}
 }
 
 // Apply returns an http.Handler middleware that evaluates rules against
@@ -96,6 +162,7 @@ func Apply(limiter ratelimit.Limiter, rules []Rule, cfg Config) func(http.Handle
 	if cfg.Enabled != nil {
 		enabled = *cfg.Enabled
 	}
+	hasher := newLogHasher(cfg.LogHashSecret)
 
 	return func(next http.Handler) http.Handler {
 		if !enabled || len(rules) == 0 {
@@ -112,7 +179,7 @@ func Apply(limiter ratelimit.Limiter, rules []Rule, cfg Config) func(http.Handle
 				switch {
 				case errors.Is(err, ratelimit.ErrUnavailable):
 					recorder.Unavailable(rule.Endpoint)
-					logUnavailable(logger, rule, value, err)
+					logUnavailable(r.Context(), logger, hasher, rule, value, err)
 					if rule.FailClosed {
 						writeUnavailable(w)
 						return
@@ -124,10 +191,10 @@ func Apply(limiter ratelimit.Limiter, rules []Rule, cfg Config) func(http.Handle
 					// Misconfiguration (e.g. zero Limit) is fail-closed by
 					// definition: the operator wants to know.
 					recorder.Unavailable(rule.Endpoint)
-					logger.Error("ratelimit: limiter rejected the call",
+					logger.LogAttrs(r.Context(), slog.LevelError, "ratelimit: limiter rejected the call",
 						slog.String("endpoint", rule.Endpoint),
 						slog.String("bucket_name", rule.Bucket),
-						slog.String("bucket_value_hash", hashValue(value)),
+						slog.String("bucket_value_hash", hasher.hash(value)),
 						slog.String("error", err.Error()),
 					)
 					writeUnavailable(w)
@@ -135,10 +202,10 @@ func Apply(limiter ratelimit.Limiter, rules []Rule, cfg Config) func(http.Handle
 				}
 				if !dec.Allowed {
 					recorder.Denied(rule.Endpoint, rule.Bucket)
-					logger.Info("ratelimit: denied",
+					logger.LogAttrs(r.Context(), slog.LevelInfo, "ratelimit: denied",
 						slog.String("endpoint", rule.Endpoint),
 						slog.String("bucket_name", rule.Bucket),
-						slog.String("bucket_value_hash", hashValue(value)),
+						slog.String("bucket_value_hash", hasher.hash(value)),
 						slog.Int("limit", rule.Limit.Max),
 						slog.Duration("retry", dec.Retry),
 					)
@@ -152,22 +219,17 @@ func Apply(limiter ratelimit.Limiter, rules []Rule, cfg Config) func(http.Handle
 	}
 }
 
-// composeKey assembles the bucket key as `endpoint:bucket:value`. Adapters
-// receive this opaque string; only the middleware understands the layout.
+// composeKey assembles the bucket key as `endpoint<NUL>bucket<NUL>value`.
+// Adapters receive this opaque string; only the middleware understands the
+// layout. NUL is impossible in any of the three segments (HTTP header
+// values, e-mail addresses, IPv4/IPv6 textual forms, tenant IDs) so the
+// segments cannot collide regardless of operator config or attacker input.
 //
 // The endpoint label may contain a method+path (e.g. "POST /login"), so we
-// normalize whitespace so the key never carries ambiguous separators.
+// normalize whitespace so logs and metrics labels remain readable.
 func composeKey(endpoint, bucket, value string) string {
 	endpoint = strings.ReplaceAll(endpoint, " ", "_")
-	return endpoint + ":" + bucket + ":" + value
-}
-
-// hashValue returns the first 8 bytes of SHA-256 of value as hex. We keep
-// only 64 bits of identity so logs cannot be reversed to the original PII
-// (email, IP, tenant id) while still being useful for incident triage.
-func hashValue(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:8])
+	return endpoint + keyDelimiter + bucket + keyDelimiter + value
 }
 
 func writeDenied(w http.ResponseWriter, limit int, retry time.Duration, now time.Time) {
@@ -198,15 +260,18 @@ func writeUnavailable(w http.ResponseWriter) {
 	_, _ = fmt.Fprintln(w, `{"error":"rate_limit_unavailable"}`)
 }
 
-func logUnavailable(logger *slog.Logger, rule Rule, value string, err error) {
+// logUnavailable emits the warn/error line for a limiter-unavailable
+// outcome. ctx must be the request context so request-scoped slog
+// attributes (request id, trace id, tenant id) survive into the log line.
+func logUnavailable(ctx context.Context, logger *slog.Logger, hasher logHasher, rule Rule, value string, err error) {
 	level := slog.LevelWarn
 	if rule.FailClosed {
 		level = slog.LevelError
 	}
-	logger.Log(context.Background(), level, "ratelimit: backend unavailable",
+	logger.LogAttrs(ctx, level, "ratelimit: backend unavailable",
 		slog.String("endpoint", rule.Endpoint),
 		slog.String("bucket_name", rule.Bucket),
-		slog.String("bucket_value_hash", hashValue(value)),
+		slog.String("bucket_value_hash", hasher.hash(value)),
 		slog.Bool("fail_closed", rule.FailClosed),
 		slog.String("error", err.Error()),
 	)
@@ -247,14 +312,23 @@ func FormFieldKey(name string) KeyExtractor {
 	}
 }
 
-// HeaderKey extracts a header value (trimmed). Skips when the header is
-// absent.
+// HeaderKey extracts a header value (trimmed). It rejects values longer
+// than maxHeaderKeyValueLen bytes (after trimming) to bound limiter-key
+// cardinality: an unauthenticated attacker who controls the header can
+// otherwise force unbounded distinct keys × TTL into the limiter store.
+// The rule is skipped (ok=false) when the header is absent, empty, or
+// over-long; the underlying handler should still validate the field
+// itself for shape and authenticity.
 func HeaderKey(name string) KeyExtractor {
 	return func(r *http.Request) (string, bool) {
-		if v := strings.TrimSpace(r.Header.Get(name)); v != "" {
-			return v, true
+		v := strings.TrimSpace(r.Header.Get(name))
+		if v == "" {
+			return "", false
 		}
-		return "", false
+		if len(v) > maxHeaderKeyValueLen {
+			return "", false
+		}
+		return v, true
 	}
 }
 
@@ -276,12 +350,23 @@ func ContextValueKey(ctxKey any) KeyExtractor {
 	}
 }
 
-// splitHostPort is like net.SplitHostPort, but tolerates RemoteAddr values
-// that have no port (some test transports populate just an IP).
+// splitHostPort wraps net.SplitHostPort so RemoteAddr values produced by
+// odd transports — bare IPv4 ("203.0.113.10"), bare IPv6 ("::1"), unix
+// domain sockets — fall back to returning the raw address as the host
+// rather than mangling it. Real-shaped values (host:port,
+// "[2001:db8::1]:80") behave like the stdlib helper.
 func splitHostPort(addr string) (string, string, error) {
-	i := strings.LastIndexByte(addr, ':')
-	if i < 0 {
+	host, port, err := net.SplitHostPort(addr)
+	if err == nil {
+		return host, port, nil
+	}
+	var addrErr *net.AddrError
+	if errors.As(err, &addrErr) {
+		// Missing port, too many colons (bare IPv6), etc.: treat the
+		// whole input as the host. This is observably stricter for
+		// IPv6 — every bracket-less address shares one bucket — but
+		// avoids the previous behaviour of emitting "::" as the host.
 		return addr, "", nil
 	}
-	return addr[:i], addr[i+1:], nil
+	return "", "", err
 }
