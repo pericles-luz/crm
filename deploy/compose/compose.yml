@@ -73,9 +73,20 @@ services:
     networks: [crm]
     working_dir: /src
     command: ["go", "run", "./cmd/server"]
+    # SIN-62212 / CEO review on PR1: the app container MUST NOT see
+    # deploy/compose/.env or any path outside the source tree. Secrets
+    # arrive via env_file (read by the docker daemon, never bind-mounted)
+    # and DATABASE_URL is composed at compose-up time. PR9 replaces the
+    # selective binds below with a multi-stage image build.
+    env_file: .env
     environment:
       HTTP_ADDR: ":8080"
-    volumes: [../../:/src:ro]
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crm}?sslmode=disable}
+    volumes:
+      - ../../go.mod:/src/go.mod:ro
+      - ../../go.sum:/src/go.sum:ro
+      - ../../cmd:/src/cmd:ro
+      - ../../internal:/src/internal:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
