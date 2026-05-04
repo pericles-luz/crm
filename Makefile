@@ -7,6 +7,12 @@ COMPOSE := docker compose --project-directory $(COMPOSE_DIR) -f $(COMPOSE_DIR)/c
 GO ?= go
 NOTENANT_BIN := $(CURDIR)/bin/notenant
 
+# golang-migrate CLI shipped as a one-shot container; see migrations/*.sql
+# (SIN-62209). Versioned so CI and devs share the same binary.
+MIGRATE_IMAGE := migrate/migrate:v4.17.1
+MIGRATIONS_DIR := $(CURDIR)/migrations
+COMPOSE_NETWORK := crm_crm
+
 .DEFAULT_GOAL := help
 
 .PHONY: help up down logs test lint lint-aicache migrate-up migrate-down seed-stg smoke-alert verify-vendor
@@ -41,14 +47,36 @@ lint-aicache: ## Run the SIN-62236 aicache analyzer over internal/ai/ as a vet t
 	$(GO) build -o ./bin/aicache ./cmd/aicache
 	$(GO) vet -vettool=$(CURDIR)/bin/aicache ./internal/ai/...
 
-migrate-up: ## Apply DB migrations (wired in PR2 with goose)
-	@echo "migrate-up: stub — PR2 (SIN Fase 0) wires goose against postgres service"
+migrate-up: ## Apply all DB migrations against the compose Postgres (SIN-62209)
+	@if [ ! -f $(COMPOSE_DIR)/.env ]; then \
+		echo "missing $(COMPOSE_DIR)/.env — copy .env.example and fill secrets"; exit 1; \
+	fi
+	set -a; . $(COMPOSE_DIR)/.env; set +a; \
+	docker run --rm --network $(COMPOSE_NETWORK) \
+		-v $(MIGRATIONS_DIR):/migrations:ro \
+		$(MIGRATE_IMAGE) -path /migrations \
+		-database "postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/$$POSTGRES_DB?sslmode=disable" \
+		up
 
-migrate-down: ## Rollback the most recent DB migration (wired in PR2)
-	@echo "migrate-down: stub — PR2 (SIN Fase 0) wires goose against postgres service"
+migrate-down: ## Roll back ALL DB migrations (destructive; SIN-62209)
+	@if [ ! -f $(COMPOSE_DIR)/.env ]; then \
+		echo "missing $(COMPOSE_DIR)/.env"; exit 1; \
+	fi
+	set -a; . $(COMPOSE_DIR)/.env; set +a; \
+	docker run --rm --network $(COMPOSE_NETWORK) \
+		-v $(MIGRATIONS_DIR):/migrations:ro \
+		$(MIGRATE_IMAGE) -path /migrations \
+		-database "postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/$$POSTGRES_DB?sslmode=disable" \
+		down -all
 
-seed-stg: ## Seed staging fixtures (wired in PR2)
-	@echo "seed-stg: stub — PR2 (SIN Fase 0) provides staging seed"
+seed-stg: ## Apply staging seed fixtures (idempotent; SIN-62209)
+	@if [ ! -f $(COMPOSE_DIR)/.env ]; then \
+		echo "missing $(COMPOSE_DIR)/.env"; exit 1; \
+	fi
+	set -a; . $(COMPOSE_DIR)/.env; set +a; \
+	$(COMPOSE) exec -T postgres \
+		psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+		< $(MIGRATIONS_DIR)/seed/stg.sql
 
 smoke-alert: ## Inject a synthetic alert into Slack #alerts (wired in PR10)
 	@echo "smoke-alert: stub — PR10 (SIN Fase 0) implements Slack injection"
