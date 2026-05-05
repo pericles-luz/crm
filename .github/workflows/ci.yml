@@ -44,6 +44,12 @@ jobs:
         run: go vet -vettool=$(pwd)/bin/notenant ./internal/...
       - name: notenant analyzer self-test
         run: go test ./tools/lint/notenant/... -count=1
+      - name: build forbidimport analyzer (SIN-62216)
+        run: go build -o bin/forbidimport ./tools/lint/forbidimport/cmd/forbidimport
+      - name: forbidimport analyzer (./internal/...)
+        run: go vet -vettool=$(pwd)/bin/forbidimport ./internal/...
+      - name: forbidimport analyzer self-test
+        run: go test ./tools/lint/forbidimport/... -count=1
 
   test:
     name: test
