@@ -125,9 +125,11 @@ artifacts anonymously. Push them from a workstation that already has the repo
 cloned (the same workstation you used in §3 to generate the CD SSH keypair):
 
 ```bash
-# On the workstation, in the cloned `crm` repo root:
+# On the workstation, in the cloned `crm` repo root.
+# Replace REPLACE_STG_HOST with the staging VPS hostname or IP.
+STG_HOST="REPLACE_STG_HOST"
 scp deploy/compose/compose.stg.yml deploy/scripts/stg-deploy.sh \
-    root@<stg-host>:/tmp/
+    "root@${STG_HOST}:/tmp/"
 ```
 
 Back on the VPS, lay out the stack directory and install both files. The
@@ -224,7 +226,8 @@ The runner verifies the VPS host key via `STG_HOST_KEY` to avoid TOFU. Capture
 it once during provisioning:
 
 ```bash
-ssh-keyscan -t ed25519 <stg-host> | tee stg.host_key
+STG_HOST="REPLACE_STG_HOST"
+ssh-keyscan -t ed25519 "${STG_HOST}" | tee stg.host_key
 ```
 
 Paste the output of that file into the `STG_HOST_KEY` GitHub Actions secret.
@@ -247,9 +250,10 @@ The deploy wrapper records the previous `APP_IMAGE` in `/opt/crm/stg/.last-image
 just before swapping. To revert:
 
 ```bash
+STG_SMOKE_URL="https://acme.crm.REPLACE_WITH_STG_DOMAIN"
 prev="$(cat /opt/crm/stg/.last-image)"
 sudo -u crm-deploy /opt/crm/stg/bin/deploy.sh deploy "${prev}"
-curl -fsS https://acme.crm.<stg-domain>/health
+curl -fsS "${STG_SMOKE_URL}/health"
 ```
 
 If the rollback also fails, `compose down && compose up` is the next escalation;
