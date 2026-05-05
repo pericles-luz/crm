@@ -126,7 +126,12 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL not set in /opt/crm/stg/.env.stg}
       STG_TENANT_HOSTS: ${STG_TENANT_HOSTS:?STG_TENANT_HOSTS not set in /opt/crm/stg/.env.stg}
     volumes:
-      - ../caddy:/etc/caddy:ro
+      # `./caddy` resolves against the directory containing this compose
+      # file, i.e. /opt/crm/stg/caddy/ on the VPS. The local-dev compose.yml
+      # uses `../caddy` because deploy/compose/ and deploy/caddy/ are
+      # peers in the source tree; on stg the operator scps both files into
+      # the single /opt/crm/stg/caddy/ directory (see staging.md §4).
+      - ./caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [app]

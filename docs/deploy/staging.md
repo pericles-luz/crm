@@ -149,31 +149,43 @@ cloned (the same workstation you used in §3 to generate the CD SSH keypair):
 STG_HOST="REPLACE_STG_HOST"
 scp deploy/compose/compose.stg.yml deploy/scripts/stg-deploy.sh \
     "root@${STG_HOST}:/tmp/"
+# Caddy reads its config from /etc/caddy/, mounted from /opt/crm/stg/caddy/.
+# Send the two files Caddy needs at startup:
+scp deploy/caddy/Caddyfile.stg deploy/caddy/security-headers.caddy \
+    "root@${STG_HOST}:/tmp/"
 ```
 
-Back on the VPS, lay out the stack directory and install both files. The
+Back on the VPS, lay out the stack directory and install all four files. The
 operator running this block must be `root` (or in a sudo session) — the
 `crm-deploy` account exists but has no shell.
 
 ```bash
-# Sanity check: confirm scp landed both files in /tmp.
-test -s /tmp/compose.stg.yml && test -s /tmp/stg-deploy.sh
+# Sanity check: confirm scp landed everything in /tmp.
+for f in compose.stg.yml stg-deploy.sh Caddyfile.stg security-headers.caddy; do
+  test -s "/tmp/${f}" || { echo "missing /tmp/${f}"; exit 1; }
+done
 
-# Lay out the stack directory and install the two files into it.
-install -d -o crm-deploy -g crm-deploy -m 0750 /opt/crm/stg /opt/crm/stg/bin
+# Lay out the stack directory and install the four files into it.
+install -d -o crm-deploy -g crm-deploy -m 0750 \
+  /opt/crm/stg /opt/crm/stg/bin /opt/crm/stg/caddy
 install -o crm-deploy -g crm-deploy -m 0640 \
   /tmp/compose.stg.yml /opt/crm/stg/compose.stg.yml
 install -o root -g crm-deploy -m 0750 \
   /tmp/stg-deploy.sh /opt/crm/stg/bin/deploy.sh
+install -o crm-deploy -g crm-deploy -m 0640 \
+  /tmp/Caddyfile.stg /opt/crm/stg/caddy/Caddyfile.stg
+install -o crm-deploy -g crm-deploy -m 0640 \
+  /tmp/security-headers.caddy /opt/crm/stg/caddy/security-headers.caddy
 
 # Empty secrets file with the right ownership; you fill it in below.
 install -o crm-deploy -g crm-deploy -m 0640 /dev/null /opt/crm/stg/.env.stg
 ```
 
-If you ever bump `compose.stg.yml` or `stg-deploy.sh` on `main`, repeat the
-same `scp` + `install` flow from a workstation — the CD pipeline only pushes
-the application image, not these on-host artifacts. Automating that sync is
-tracked as a follow-up; until then it is operator-driven.
+If you ever bump `compose.stg.yml`, `stg-deploy.sh`, or any file under
+`deploy/caddy/` on `main`, repeat the same `scp` + `install` flow from a
+workstation — the CD pipeline only pushes the application image, not these
+on-host artifacts. Automating that sync is tracked as a follow-up; until
+then it is operator-driven.
 
 Generate the two infra passwords. They land in `DATABASE_URL` and the MinIO
 admin credential, so they MUST be alphanumeric (no `@`, `:`, `/`, `?` —
