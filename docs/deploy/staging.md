@@ -116,17 +116,43 @@ arbitrary commands — only `/opt/crm/stg/bin/deploy.sh` with a single argument.
 
 ### 4. Stack layout on the VPS
 
+This step lays down `/opt/crm/stg/` on the VPS itself. Run it BEFORE the first
+deploy in §5 — `compose.stg.yml` and the deploy wrapper need to be present
+before `/opt/crm/stg/bin/deploy.sh` can be invoked.
+
+The repo is private, so `raw.githubusercontent.com` cannot serve the two
+artifacts anonymously. Push them from a workstation that already has the repo
+cloned (the same workstation you used in §3 to generate the CD SSH keypair):
+
 ```bash
+# On the workstation, in the cloned `crm` repo root:
+scp deploy/compose/compose.stg.yml deploy/scripts/stg-deploy.sh \
+    root@<stg-host>:/tmp/
+```
+
+Back on the VPS, lay out the stack directory and install both files. The
+operator running this block must be `root` (or in a sudo session) — the
+`crm-deploy` account exists but has no shell.
+
+```bash
+# Sanity check: confirm scp landed both files in /tmp.
+test -s /tmp/compose.stg.yml && test -s /tmp/stg-deploy.sh
+
+# Lay out the stack directory and install the two files into it.
 install -d -o crm-deploy -g crm-deploy -m 0750 /opt/crm/stg /opt/crm/stg/bin
-# copy compose.stg.yml from this repo:
 install -o crm-deploy -g crm-deploy -m 0640 \
   /tmp/compose.stg.yml /opt/crm/stg/compose.stg.yml
-# copy the deploy wrapper (from this repo: deploy/scripts/stg-deploy.sh):
 install -o root -g crm-deploy -m 0750 \
   /tmp/stg-deploy.sh /opt/crm/stg/bin/deploy.sh
-# secrets:
+
+# Empty secrets file with the right ownership; you fill it in below.
 install -o crm-deploy -g crm-deploy -m 0640 /dev/null /opt/crm/stg/.env.stg
 ```
+
+If you ever bump `compose.stg.yml` or `stg-deploy.sh` on `main`, repeat the
+same `scp` + `install` flow from a workstation — the CD pipeline only pushes
+the application image, not these on-host artifacts. Automating that sync is
+tracked as a follow-up; until then it is operator-driven.
 
 Fill `/opt/crm/stg/.env.stg` with:
 
