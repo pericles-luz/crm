@@ -116,17 +116,37 @@ arbitrary commands — only `/opt/crm/stg/bin/deploy.sh` with a single argument.
 
 ### 4. Stack layout on the VPS
 
+This step lays down `/opt/crm/stg/` on the VPS itself. Run it BEFORE the first
+deploy in §5 — `compose.stg.yml` and the deploy wrapper need to be present
+before `/opt/crm/stg/bin/deploy.sh` can be invoked. The files come straight
+from `main` of this repo via `curl`; nothing has to be staged from a
+workstation.
+
 ```bash
+# Pull the two files from main into /tmp first (no git on the VPS required):
+curl -fsSL -o /tmp/compose.stg.yml \
+  https://raw.githubusercontent.com/pericles-luz/crm/main/deploy/compose/compose.stg.yml
+curl -fsSL -o /tmp/stg-deploy.sh \
+  https://raw.githubusercontent.com/pericles-luz/crm/main/deploy/scripts/stg-deploy.sh
+
+# Verify both files actually downloaded (curl above is -f, so a 404 already
+# would have failed; this is just a sanity check).
+test -s /tmp/compose.stg.yml && test -s /tmp/stg-deploy.sh
+
+# Lay out the stack directory and install the two files into it.
 install -d -o crm-deploy -g crm-deploy -m 0750 /opt/crm/stg /opt/crm/stg/bin
-# copy compose.stg.yml from this repo:
 install -o crm-deploy -g crm-deploy -m 0640 \
   /tmp/compose.stg.yml /opt/crm/stg/compose.stg.yml
-# copy the deploy wrapper (from this repo: deploy/scripts/stg-deploy.sh):
 install -o root -g crm-deploy -m 0750 \
   /tmp/stg-deploy.sh /opt/crm/stg/bin/deploy.sh
-# secrets:
+
+# Empty secrets file with the right ownership; you fill it in below.
 install -o crm-deploy -g crm-deploy -m 0640 /dev/null /opt/crm/stg/.env.stg
 ```
+
+If you ever bump `compose.stg.yml` or `stg-deploy.sh` on `main`, repeat the two
+`curl` lines and the matching `install` lines to refresh the on-host copies —
+the CD pipeline does not push these files, only the application image.
 
 Fill `/opt/crm/stg/.env.stg` with:
 
