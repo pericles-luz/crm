@@ -80,8 +80,16 @@ mv "${tmp}"  "${ENV_FILE}"
 trap - EXIT
 
 cd "${STG_DIR}"
-docker compose -f "${COMPOSE_FILE}" pull
-docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+
+# --env-file is required: compose's variable interpolation only auto-loads a
+# file literally named .env, but ours is .env.stg. Without --env-file, the
+# `${MINIO_ROOT_USER:?…}` / `${POSTGRES_PASSWORD:?…}` placeholders in
+# compose.stg.yml fail with "required variable … is missing a value", even
+# though the app service's env_file: directive picks the same file up at
+# runtime — env_file feeds containers, --env-file feeds compose itself.
+readonly COMPOSE_ARGS=( --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" )
+docker compose "${COMPOSE_ARGS[@]}" pull
+docker compose "${COMPOSE_ARGS[@]}" up -d --remove-orphans
 docker system prune -af --volumes=false
 
 echo "stg-deploy: ${NEW_IMAGE} live (previous: ${prev:-<none>})"

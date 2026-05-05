@@ -234,11 +234,19 @@ Paste the output of that file into the `STG_HOST_KEY` GitHub Actions secret.
 
 ## Reading logs
 
+`docker compose` parses `compose.stg.yml` even for read-only operations like
+`logs`, and `compose.stg.yml` uses `${VAR:?…}` placeholders, so every
+invocation needs `--env-file /opt/crm/stg/.env.stg` — otherwise compose errors
+with `required variable … is missing a value` before it ever reads container
+state.
+
 ```bash
+COMPOSE_ARGS="--env-file /opt/crm/stg/.env.stg -f /opt/crm/stg/compose.stg.yml"
+
 # All services, follow:
-sudo -u crm-deploy docker compose -f /opt/crm/stg/compose.stg.yml logs -f --tail=200
+sudo -u crm-deploy docker compose ${COMPOSE_ARGS} logs -f --tail=200
 # Single service:
-sudo -u crm-deploy docker compose -f /opt/crm/stg/compose.stg.yml logs -f --tail=500 app
+sudo -u crm-deploy docker compose ${COMPOSE_ARGS} logs -f --tail=500 app
 # What is currently deployed:
 sudo -u crm-deploy grep '^APP_IMAGE=' /opt/crm/stg/.env.stg
 sudo -u crm-deploy cat /opt/crm/stg/.last-image  # what was running before this deploy
