@@ -213,9 +213,12 @@ POSTGRES_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 MINIO_ROOT_USER=crm-admin
 MINIO_ROOT_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 HSTS_MAX_AGE=300
-# Let's Encrypt account contact for cert issuance / expiry warnings. A real
-# inbox someone monitors — LE only emails on problems.
-ACME_EMAIL=REPLACE_WITH_OPS_EMAIL
+# Let's Encrypt account contact for cert issuance / expiry warnings. MUST be
+# a real RFC 5322 address with a valid TLD — Let's Encrypt and ZeroSSL both
+# reject anything else with HTTP 400 invalidContact ("Domain name contains
+# an invalid character") and Caddy retries forever with no certs ever issued.
+# `name@example.com` is fine; `name@REPLACE_…` is not.
+ACME_EMAIL=REPLACE_WITH_REAL_OPS_EMAIL
 # Comma-separated list of tenant FQDNs Caddy provisions certs for. Order
 # does not matter; every entry must already have an A record pointing at
 # the VPS public IP (verify with the dig loop above).
@@ -330,8 +333,14 @@ populate the GitHub Actions secrets.
 If the external check times out on `port 443` indefinitely, in that order:
 
 1. `sudo -u crm-deploy docker logs crm-stg-caddy-1 --tail 50` — Caddy logs
-   the Let's Encrypt failure inline; common offenders are missing/wrong DNS
-   A records or UFW blocking 80 (LE needs both 80 and 443).
+   the Let's Encrypt failure inline; common offenders are:
+   - **`invalidContact: contact email has invalid domain`** — `ACME_EMAIL`
+     in `.env.stg` still has a placeholder or otherwise invalid TLD (`_`,
+     `REPLACE_…`, etc). Fix the value, then `compose up -d --force-recreate
+     caddy` (env vars only re-read on container creation, not on `restart`).
+   - Missing or wrong DNS A records.
+   - UFW blocking 80 (LE needs **both** 80 and 443 — 80 for the HTTP-01
+     challenge, 443 for the eventual cert handshake).
 2. `dig +short <fqdn>` from a workstation — confirm DNS resolves to the VPS.
 3. `sudo ufw status` on the VPS — confirm 80 and 443 are allowed.
 
