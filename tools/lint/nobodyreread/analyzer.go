@@ -308,4 +308,3 @@ func suppressionLines(pass *analysis.Pass) map[int]bool {
 	}
 	return out
 }
-

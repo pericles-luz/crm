@@ -54,4 +54,3 @@ func TestAnalyzer_RejectsBareSuppressionMarker(t *testing.T) {
 	a := nomathrand.NewAnalyzer(fixtureConfig)
 	analysistest.Run(t, analysistest.TestData(), a, "emptyreasonpkg")
 }
-
