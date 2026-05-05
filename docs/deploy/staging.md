@@ -32,6 +32,25 @@ if it ever does.
 
 Assumes Debian 12 / Ubuntu 24.04 with a public IP and root SSH from a bastion.
 
+Before starting, decide which tenant FQDNs the staging stack will host (Fase 0
+defaults are `acme.crm.<base>` and `globex.crm.<base>`) and create A records
+for each one pointing at the VPS public IP. Caddy uses Let's Encrypt's HTTP-01
+challenge to issue certs and that requires the DNS already be in place; a
+missing or wrong record means 443 silently never opens. Verify on a
+workstation:
+
+```bash
+STG_HOST_IP="REPLACE_WITH_VPS_IP"
+for host in acme.crm.REPLACE_WITH_BASE globex.crm.REPLACE_WITH_BASE; do
+  got=$(dig +short "${host}" A | tail -n1)
+  if [ "${got}" = "${STG_HOST_IP}" ]; then
+    echo "ok ${host} → ${got}"
+  else
+    echo "MISMATCH ${host} → ${got:-empty}"
+  fi
+done
+```
+
 ### 1. Base packages
 
 Docker publishes separate apt repositories for Debian and Ubuntu — the URL
@@ -130,31 +149,43 @@ cloned (the same workstation you used in §3 to generate the CD SSH keypair):
 STG_HOST="REPLACE_STG_HOST"
 scp deploy/compose/compose.stg.yml deploy/scripts/stg-deploy.sh \
     "root@${STG_HOST}:/tmp/"
+# Caddy reads its config from /etc/caddy/, mounted from /opt/crm/stg/caddy/.
+# Send the two files Caddy needs at startup:
+scp deploy/caddy/Caddyfile.stg deploy/caddy/security-headers.caddy \
+    "root@${STG_HOST}:/tmp/"
 ```
 
-Back on the VPS, lay out the stack directory and install both files. The
+Back on the VPS, lay out the stack directory and install all four files. The
 operator running this block must be `root` (or in a sudo session) — the
 `crm-deploy` account exists but has no shell.
 
 ```bash
-# Sanity check: confirm scp landed both files in /tmp.
-test -s /tmp/compose.stg.yml && test -s /tmp/stg-deploy.sh
+# Sanity check: confirm scp landed everything in /tmp.
+for f in compose.stg.yml stg-deploy.sh Caddyfile.stg security-headers.caddy; do
+  test -s "/tmp/${f}" || { echo "missing /tmp/${f}"; exit 1; }
+done
 
-# Lay out the stack directory and install the two files into it.
-install -d -o crm-deploy -g crm-deploy -m 0750 /opt/crm/stg /opt/crm/stg/bin
+# Lay out the stack directory and install the four files into it.
+install -d -o crm-deploy -g crm-deploy -m 0750 \
+  /opt/crm/stg /opt/crm/stg/bin /opt/crm/stg/caddy
 install -o crm-deploy -g crm-deploy -m 0640 \
   /tmp/compose.stg.yml /opt/crm/stg/compose.stg.yml
 install -o root -g crm-deploy -m 0750 \
   /tmp/stg-deploy.sh /opt/crm/stg/bin/deploy.sh
+install -o crm-deploy -g crm-deploy -m 0640 \
+  /tmp/Caddyfile.stg /opt/crm/stg/caddy/Caddyfile.stg
+install -o crm-deploy -g crm-deploy -m 0640 \
+  /tmp/security-headers.caddy /opt/crm/stg/caddy/security-headers.caddy
 
 # Empty secrets file with the right ownership; you fill it in below.
 install -o crm-deploy -g crm-deploy -m 0640 /dev/null /opt/crm/stg/.env.stg
 ```
 
-If you ever bump `compose.stg.yml` or `stg-deploy.sh` on `main`, repeat the
-same `scp` + `install` flow from a workstation — the CD pipeline only pushes
-the application image, not these on-host artifacts. Automating that sync is
-tracked as a follow-up; until then it is operator-driven.
+If you ever bump `compose.stg.yml`, `stg-deploy.sh`, or any file under
+`deploy/caddy/` on `main`, repeat the same `scp` + `install` flow from a
+workstation — the CD pipeline only pushes the application image, not these
+on-host artifacts. Automating that sync is tracked as a follow-up; until
+then it is operator-driven.
 
 Generate the two infra passwords. They land in `DATABASE_URL` and the MinIO
 admin credential, so they MUST be alphanumeric (no `@`, `:`, `/`, `?` —
@@ -182,6 +213,13 @@ POSTGRES_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 MINIO_ROOT_USER=crm-admin
 MINIO_ROOT_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 HSTS_MAX_AGE=300
+# Let's Encrypt account contact for cert issuance / expiry warnings. A real
+# inbox someone monitors — LE only emails on problems.
+ACME_EMAIL=REPLACE_WITH_OPS_EMAIL
+# Comma-separated list of tenant FQDNs Caddy provisions certs for. Order
+# does not matter; every entry must already have an A record pointing at
+# the VPS public IP (verify with the dig loop above).
+STG_TENANT_HOSTS=acme.crm.REPLACE_WITH_BASE, globex.crm.REPLACE_WITH_BASE
 # APP_IMAGE is rewritten by the deploy wrapper on every push. Bootstrap with
 # the digest you discover in §5 below — full ref like
 # ghcr.io/pericles-luz/crm@sha256:6b8f…f730ba.
@@ -273,15 +311,29 @@ sudo grep '^APP_IMAGE=' /opt/crm/stg/.env.stg   # sanity
 # 2. Run the deploy wrapper as the constrained user (NOT root):
 sudo -u crm-deploy /opt/crm/stg/bin/deploy.sh deploy "${APP_IMAGE_REF}"
 
-# 3. Smoke check from the VPS itself (replace the URL below with your own
-#    staging vhost — same value you will set in the STG_SMOKE_URL secret).
+# 3. Internal smoke check first — confirms the app/caddy/network plumbing
+#    works without depending on Let's Encrypt:
+sudo -u crm-deploy docker exec crm-stg-caddy-1 wget -qO- http://app:8080/health
+
+# 4. External smoke check. The first hit on each tenant FQDN triggers
+#    Let's Encrypt issuance, which usually takes 5–30s. If the first curl
+#    returns 525/timeout, retry once after 30 s. (Replace the URL with the
+#    same value you will set in the STG_SMOKE_URL secret.)
 STG_SMOKE_URL="https://acme.crm.REPLACE_WITH_STG_DOMAIN"
 curl -fsS "${STG_SMOKE_URL}/health"
 ```
 
-If `/health` returns `{"status":"ok"}` you are done; subsequent deploys are
-fully automated by the `cd-stg` workflow once you finish §6 and populate the
-GitHub Actions secrets.
+If both smoke checks return `{"status":"ok"}` you are done; subsequent
+deploys are fully automated by the `cd-stg` workflow once you finish §6 and
+populate the GitHub Actions secrets.
+
+If the external check times out on `port 443` indefinitely, in that order:
+
+1. `sudo -u crm-deploy docker logs crm-stg-caddy-1 --tail 50` — Caddy logs
+   the Let's Encrypt failure inline; common offenders are missing/wrong DNS
+   A records or UFW blocking 80 (LE needs both 80 and 443).
+2. `dig +short <fqdn>` from a workstation — confirm DNS resolves to the VPS.
+3. `sudo ufw status` on the VPS — confirm 80 and 443 are allowed.
 
 ### 6. Capturing the staging host key
 
