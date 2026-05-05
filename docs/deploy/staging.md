@@ -181,24 +181,35 @@ private by default. The `crm-deploy` user must be authenticated against
 `ghcr.io` BEFORE the first deploy or `docker compose pull` returns
 `unauthorized`. There are two acceptable paths — pick one and stick with it.
 
-#### Path A — fine-grained PAT on the VPS (recommended for non-public stg)
+#### Path A — classic PAT with `read:packages` on the VPS (non-public stg)
 
-1. On the workstation, create a GitHub fine-grained PAT scoped to:
-   - account: `pericles-luz`
-   - repository access: `Only select repositories` → `crm`
-   - permissions: `Repository → Metadata: Read-only`,
-     `Account → Packages: Read-only`
-2. Copy the token (it starts with `github_pat_…`) and run on the VPS:
+GitHub fine-grained PATs do NOT support package access for **user-owned**
+packages — the `Packages` permission only appears for organization-owned
+ones. For `ghcr.io/pericles-luz/crm`, use a classic PAT with the single
+`read:packages` scope (which is itself the smallest scope GitHub exposes for
+this use case).
+
+1. On the workstation, open
+   `https://github.com/settings/tokens/new?description=ghcr-stg-pull&scopes=read:packages`.
+   That URL pre-selects the only required scope; do NOT enable any other
+   checkbox. Set the expiry to whatever your rotation policy allows (90 days
+   is a sensible default).
+2. Copy the token (it starts with `ghp_…`) and run on the VPS:
    ```bash
    GHCR_USER="pericles-luz"
-   GHCR_TOKEN="REPLACE_WITH_FINE_GRAINED_PAT"
+   GHCR_TOKEN="REPLACE_WITH_CLASSIC_PAT"
    sudo -u crm-deploy bash -c "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
    ```
    That writes `~crm-deploy/.docker/config.json` with the encoded
    credential. Subsequent `docker compose pull` runs as `crm-deploy` reuse
    the same file silently.
-3. Rotation: regenerate the PAT and re-run the `docker login` line. Old
-   tokens revoke automatically once superseded.
+3. Rotation: generate a new PAT and re-run the `docker login` line — old
+   tokens are superseded in `config.json` automatically. Revoke the old PAT
+   in the GitHub UI once the new one is in place.
+
+If `crm` ever moves under an organization, switch to a fine-grained PAT
+scoped to that org with `Packages: Read-only` and `crm` selected — that
+form does work for org packages.
 
 #### Path B — make the GHCR package public
 
