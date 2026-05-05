@@ -1,0 +1,13 @@
+.git
+.github
+bin
+deploy
+docs
+migrations
+scripts
+tools
+web
+*.md
+.env
+.env.*
+!.env.example

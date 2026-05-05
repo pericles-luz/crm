@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# stg-deploy.sh — VPS-side deploy entrypoint for the staging CD pipeline.
+# Installed at /opt/crm/stg/bin/deploy.sh per docs/deploy/staging.md.
+#
+# The CD SSH key in /home/<deploy-user>/.ssh/authorized_keys MUST be locked
+# down with command="/opt/crm/stg/bin/deploy.sh",no-pty,no-agent-forwarding,
+# no-port-forwarding,no-X11-forwarding so that this script is the ONLY thing
+# the GitHub runner can invoke on the host. The remote command from the
+# runner — "deploy ghcr.io/.../crm@sha256:..." — arrives via $SSH_ORIGINAL_COMMAND.
+#
+# Contract:
+#   - Argument: APP_IMAGE reference, MUST match ghcr.io/pericles-luz/crm@sha256:[0-9a-f]{64}
+#   - Effect:   updates /opt/crm/stg/.env.stg, runs `compose pull && up -d`,
+#               then prunes dangling images. Previous APP_IMAGE is recorded
+#               in /opt/crm/stg/.last-image so manual rollback can read it.
+#   - On any error: exits non-zero (CD job goes red, NO automatic rollback).
+
+set -euo pipefail
+
+readonly STG_DIR="/opt/crm/stg"
+readonly ENV_FILE="${STG_DIR}/.env.stg"
+readonly COMPOSE_FILE="${STG_DIR}/compose.stg.yml"
+readonly LAST_IMAGE_FILE="${STG_DIR}/.last-image"
+readonly EXPECTED_REPO="ghcr.io/pericles-luz/crm"
+readonly DIGEST_RE="^${EXPECTED_REPO}@sha256:[0-9a-f]{64}$"
+
+# Parse the original SSH command if invoked via authorized_keys command="..."
+# constraint, otherwise accept positional arg (manual run).
+if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+  # shellcheck disable=SC2206  # intentional word-split of remote command
+  argv=( ${SSH_ORIGINAL_COMMAND} )
+else
+  argv=( "$@" )
+fi
+
+if [[ "${#argv[@]}" -ne 2 || "${argv[0]}" != "deploy" ]]; then
+  echo "stg-deploy: usage: deploy <image-ref>" >&2
+  exit 64
+fi
+
+readonly NEW_IMAGE="${argv[1]}"
+
+if [[ ! "${NEW_IMAGE}" =~ ${DIGEST_RE} ]]; then
+  echo "stg-deploy: refusing image ref ${NEW_IMAGE}" >&2
+  echo "stg-deploy: must match ${EXPECTED_REPO}@sha256:<64 hex>" >&2
+  exit 65
+fi
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  echo "stg-deploy: ${ENV_FILE} missing — run provisioning checklist first" >&2
+  exit 66
+fi
+
+if [[ ! -f "${COMPOSE_FILE}" ]]; then
+  echo "stg-deploy: ${COMPOSE_FILE} missing — run provisioning checklist first" >&2
+  exit 66
+fi
+
+# Capture the previous APP_IMAGE so a human can roll back without grepping.
+prev=""
+if grep -q '^APP_IMAGE=' "${ENV_FILE}" 2>/dev/null; then
+  prev="$(grep '^APP_IMAGE=' "${ENV_FILE}" | tail -n1 | cut -d= -f2-)"
+fi
+if [[ -n "${prev}" ]]; then
+  printf '%s\n' "${prev}" > "${LAST_IMAGE_FILE}"
+fi
+
+# Atomically rewrite APP_IMAGE in the env file. Sed with a tmp file keeps the
+# rest of the env (POSTGRES_*, MINIO_*, HSTS_MAX_AGE, …) untouched.
+tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
+trap 'rm -f "${tmp}"' EXIT
+if grep -q '^APP_IMAGE=' "${ENV_FILE}"; then
+  sed "s|^APP_IMAGE=.*|APP_IMAGE=${NEW_IMAGE}|" "${ENV_FILE}" > "${tmp}"
+else
+  cp "${ENV_FILE}" "${tmp}"
+  printf '\nAPP_IMAGE=%s\n' "${NEW_IMAGE}" >> "${tmp}"
+fi
+chmod --reference="${ENV_FILE}" "${tmp}"
+mv "${tmp}"  "${ENV_FILE}"
+trap - EXIT
+
+cd "${STG_DIR}"
+docker compose -f "${COMPOSE_FILE}" pull
+docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+docker system prune -af --volumes=false
+
+echo "stg-deploy: ${NEW_IMAGE} live (previous: ${prev:-<none>})"
