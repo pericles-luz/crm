@@ -154,29 +154,69 @@ same `scp` + `install` flow from a workstation — the CD pipeline only pushes
 the application image, not these on-host artifacts. Automating that sync is
 tracked as a follow-up; until then it is operator-driven.
 
-Fill `/opt/crm/stg/.env.stg` with:
+Fill `/opt/crm/stg/.env.stg`. Anything in `REPLACE_…` is a placeholder you
+must overwrite — do NOT keep the angle-bracket-style `<digest>` form, bash
+parses `<` as input redirection and the line will fail with
+`syntax error near unexpected token 'newline'`.
 
 ```dotenv
 POSTGRES_DB=crm
 POSTGRES_USER=crm
-POSTGRES_PASSWORD=<from vault>
+POSTGRES_PASSWORD=REPLACE_FROM_VAULT
 MINIO_ROOT_USER=crm-admin
-MINIO_ROOT_PASSWORD=<from vault>
+MINIO_ROOT_PASSWORD=REPLACE_FROM_VAULT
 HSTS_MAX_AGE=300
-# APP_IMAGE is rewritten by the deploy wrapper on every push; bootstrap with the
-# initial image you want online, e.g. the most recent main:
-APP_IMAGE=ghcr.io/pericles-luz/crm@sha256:<digest>
+# APP_IMAGE is rewritten by the deploy wrapper on every push. Bootstrap with
+# the digest you discover in §5 below — full ref like
+# ghcr.io/pericles-luz/crm@sha256:6b8f…f730ba.
+APP_IMAGE=REPLACE_WITH_INITIAL_DIGEST_REF
 ```
 
 ### 5. First boot
 
+The CD pipeline only takes over once the VPS already runs at least one
+working deploy. Until that bootstrap deploy lands, find the digest of an
+image already pushed to GHCR and feed it into `deploy.sh` manually.
+
+#### 5a. Find an image digest in GHCR
+
+The `cd-stg` workflow has built and pushed images for every push to `main`
+since SIN-62215 merged, even when the SSH step failed (build/push happens
+before SSH). Pick whichever digest you want online first:
+
+- **GitHub UI** — open `https://github.com/users/pericles-luz/packages/container/package/crm`,
+  click into the version row that matches the SHA you want, and copy the
+  `sha256:…` digest from the page header.
+- **`gh` CLI on a workstation** — `gh run view <RUN_ID> --repo pericles-luz/crm --log`
+  on a recent `cd-stg` run, then grep the `build & push image` block for
+  `pushing manifest for ghcr.io/pericles-luz/crm:…@sha256:…` — the digest
+  immediately after `@` is what you want.
+
+#### 5b. Run the first deploy
+
+Pin the discovered digest to a shell variable to avoid re-typing it (and to
+sidestep the `<digest>` placeholder trap):
+
 ```bash
-sudo -u crm-deploy /opt/crm/stg/bin/deploy.sh deploy ghcr.io/pericles-luz/crm@sha256:<digest>
-curl -fsS https://acme.crm.<stg-domain>/health
+DIGEST="sha256:REPLACE_WITH_64_HEX_DIGEST"
+APP_IMAGE_REF="ghcr.io/pericles-luz/crm@${DIGEST}"
+
+# 1. Make .env.stg agree with what we are about to deploy.
+sudo sed -i "s|^APP_IMAGE=.*|APP_IMAGE=${APP_IMAGE_REF}|" /opt/crm/stg/.env.stg
+sudo grep '^APP_IMAGE=' /opt/crm/stg/.env.stg   # sanity
+
+# 2. Run the deploy wrapper as the constrained user (NOT root):
+sudo -u crm-deploy /opt/crm/stg/bin/deploy.sh deploy "${APP_IMAGE_REF}"
+
+# 3. Smoke check from the VPS itself (replace the URL below with your own
+#    staging vhost — same value you will set in the STG_SMOKE_URL secret).
+STG_SMOKE_URL="https://acme.crm.REPLACE_WITH_STG_DOMAIN"
+curl -fsS "${STG_SMOKE_URL}/health"
 ```
 
 If `/health` returns `{"status":"ok"}` you are done; subsequent deploys are
-fully automated by the `cd-stg` workflow.
+fully automated by the `cd-stg` workflow once you finish §6 and populate the
+GitHub Actions secrets.
 
 ### 6. Capturing the staging host key
 
