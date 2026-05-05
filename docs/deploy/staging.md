@@ -156,6 +156,20 @@ same `scp` + `install` flow from a workstation — the CD pipeline only pushes
 the application image, not these on-host artifacts. Automating that sync is
 tracked as a follow-up; until then it is operator-driven.
 
+Generate the two infra passwords. They land in `DATABASE_URL` and the MinIO
+admin credential, so they MUST be alphanumeric (no `@`, `:`, `/`, `?` —
+those break URL parsing in `postgres://user:pass@host/...`). 256 bits of hex
+is a safe, copy-paste-friendly default:
+
+```bash
+openssl rand -hex 32   # POSTGRES_PASSWORD
+openssl rand -hex 32   # MINIO_ROOT_PASSWORD
+```
+
+Run each line once, store the outputs in your password manager (1Password,
+Bitwarden, etc.) before pasting into `.env.stg`. Losing them later means
+recreating the volumes from scratch.
+
 Fill `/opt/crm/stg/.env.stg`. Anything in `REPLACE_…` is a placeholder you
 must overwrite — do NOT keep the angle-bracket-style `<digest>` form, bash
 parses `<` as input redirection and the line will fail with
@@ -164,9 +178,9 @@ parses `<` as input redirection and the line will fail with
 ```dotenv
 POSTGRES_DB=crm
 POSTGRES_USER=crm
-POSTGRES_PASSWORD=REPLACE_FROM_VAULT
+POSTGRES_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 MINIO_ROOT_USER=crm-admin
-MINIO_ROOT_PASSWORD=REPLACE_FROM_VAULT
+MINIO_ROOT_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 HSTS_MAX_AGE=300
 # APP_IMAGE is rewritten by the deploy wrapper on every push. Bootstrap with
 # the digest you discover in §5 below — full ref like
