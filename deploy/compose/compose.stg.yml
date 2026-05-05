@@ -111,10 +111,20 @@ services:
     restart: unless-stopped
     networks: [crm]
     ports: ["80:80", "443:443"]
+    # Override Caddy's default `--config /etc/caddy/Caddyfile` so the local-dev
+    # Caddyfile (auto_https off, *.crm.local) doesn't get used in stg. The stg
+    # variant turns auto_https back on and picks site addresses from
+    # $STG_TENANT_HOSTS.
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.stg", "--adapter", "caddyfile"]
     environment:
       # In stg the soak window is short (rollback < 5 min); production
       # overrides this in Fase 1 per ADR 0082 §1 (SIN-62229).
       HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
+      # Let's Encrypt account contact + the comma-separated FQDN list Caddy
+      # provisions certs for. Both come from /opt/crm/stg/.env.stg via
+      # --env-file. Required (compose fails fast if missing).
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL not set in /opt/crm/stg/.env.stg}
+      STG_TENANT_HOSTS: ${STG_TENANT_HOSTS:?STG_TENANT_HOSTS not set in /opt/crm/stg/.env.stg}
     volumes:
       - ../caddy:/etc/caddy:ro
       - caddy-data:/data

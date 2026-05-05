@@ -32,6 +32,25 @@ if it ever does.
 
 Assumes Debian 12 / Ubuntu 24.04 with a public IP and root SSH from a bastion.
 
+Before starting, decide which tenant FQDNs the staging stack will host (Fase 0
+defaults are `acme.crm.<base>` and `globex.crm.<base>`) and create A records
+for each one pointing at the VPS public IP. Caddy uses Let's Encrypt's HTTP-01
+challenge to issue certs and that requires the DNS already be in place; a
+missing or wrong record means 443 silently never opens. Verify on a
+workstation:
+
+```bash
+STG_HOST_IP="REPLACE_WITH_VPS_IP"
+for host in acme.crm.REPLACE_WITH_BASE globex.crm.REPLACE_WITH_BASE; do
+  got=$(dig +short "${host}" A | tail -n1)
+  if [ "${got}" = "${STG_HOST_IP}" ]; then
+    echo "ok ${host} → ${got}"
+  else
+    echo "MISMATCH ${host} → ${got:-empty}"
+  fi
+done
+```
+
 ### 1. Base packages
 
 Docker publishes separate apt repositories for Debian and Ubuntu — the URL
@@ -182,6 +201,13 @@ POSTGRES_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 MINIO_ROOT_USER=crm-admin
 MINIO_ROOT_PASSWORD=REPLACE_WITH_HEX_FROM_OPENSSL_RAND
 HSTS_MAX_AGE=300
+# Let's Encrypt account contact for cert issuance / expiry warnings. A real
+# inbox someone monitors — LE only emails on problems.
+ACME_EMAIL=REPLACE_WITH_OPS_EMAIL
+# Comma-separated list of tenant FQDNs Caddy provisions certs for. Order
+# does not matter; every entry must already have an A record pointing at
+# the VPS public IP (verify with the dig loop above).
+STG_TENANT_HOSTS=acme.crm.REPLACE_WITH_BASE, globex.crm.REPLACE_WITH_BASE
 # APP_IMAGE is rewritten by the deploy wrapper on every push. Bootstrap with
 # the digest you discover in §5 below — full ref like
 # ghcr.io/pericles-luz/crm@sha256:6b8f…f730ba.
@@ -273,15 +299,29 @@ sudo grep '^APP_IMAGE=' /opt/crm/stg/.env.stg   # sanity
 # 2. Run the deploy wrapper as the constrained user (NOT root):
 sudo -u crm-deploy /opt/crm/stg/bin/deploy.sh deploy "${APP_IMAGE_REF}"
 
-# 3. Smoke check from the VPS itself (replace the URL below with your own
-#    staging vhost — same value you will set in the STG_SMOKE_URL secret).
+# 3. Internal smoke check first — confirms the app/caddy/network plumbing
+#    works without depending on Let's Encrypt:
+sudo -u crm-deploy docker exec crm-stg-caddy-1 wget -qO- http://app:8080/health
+
+# 4. External smoke check. The first hit on each tenant FQDN triggers
+#    Let's Encrypt issuance, which usually takes 5–30s. If the first curl
+#    returns 525/timeout, retry once after 30 s. (Replace the URL with the
+#    same value you will set in the STG_SMOKE_URL secret.)
 STG_SMOKE_URL="https://acme.crm.REPLACE_WITH_STG_DOMAIN"
 curl -fsS "${STG_SMOKE_URL}/health"
 ```
 
-If `/health` returns `{"status":"ok"}` you are done; subsequent deploys are
-fully automated by the `cd-stg` workflow once you finish §6 and populate the
-GitHub Actions secrets.
+If both smoke checks return `{"status":"ok"}` you are done; subsequent
+deploys are fully automated by the `cd-stg` workflow once you finish §6 and
+populate the GitHub Actions secrets.
+
+If the external check times out on `port 443` indefinitely, in that order:
+
+1. `sudo -u crm-deploy docker logs crm-stg-caddy-1 --tail 50` — Caddy logs
+   the Let's Encrypt failure inline; common offenders are missing/wrong DNS
+   A records or UFW blocking 80 (LE needs both 80 and 443).
+2. `dig +short <fqdn>` from a workstation — confirm DNS resolves to the VPS.
+3. `sudo ufw status` on the VPS — confirm 80 and 443 are allowed.
 
 ### 6. Capturing the staging host key
 
