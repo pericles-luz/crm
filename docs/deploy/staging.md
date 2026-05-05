@@ -34,18 +34,43 @@ Assumes Debian 12 / Ubuntu 24.04 with a public IP and root SSH from a bastion.
 
 ### 1. Base packages
 
+Docker publishes separate apt repositories for Debian and Ubuntu — the URL
+path is `linux/debian` on Debian and `linux/ubuntu` on Ubuntu. Set both
+variables from `/etc/os-release` so the same script works on either distro
+and fails fast if the host is something else.
+
 ```bash
 apt-get update
 apt-get install -y ca-certificates curl gnupg ufw fail2ban
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+case "$ID" in
+  debian|ubuntu) DOCKER_DISTRO="$ID" ;;
+  *)
+    echo "unsupported distro: $ID — Docker repo only ships debian and ubuntu" >&2
+    exit 1
+    ;;
+esac
+curl -fsSL "https://download.docker.com/linux/${DOCKER_DISTRO}/gpg" | \
+  gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  https://download.docker.com/linux/${DOCKER_DISTRO} ${VERSION_CODENAME} stable" \
   > /etc/apt/sources.list.d/docker.list
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
 ```
+
+Quick troubleshooting if `apt-get install docker-ce` says
+`Package docker-ce is not available`:
+
+- `cat /etc/apt/sources.list.d/docker.list` — confirm the URL contains
+  `linux/debian` on Debian or `linux/ubuntu` on Ubuntu (matching `$ID` above).
+- `cat /etc/os-release | grep -E '^(ID|VERSION_CODENAME)='` — confirm the
+  codename is one Docker actually ships (Debian: bullseye/bookworm/trixie,
+  Ubuntu: focal/jammy/noble).
+- Re-run `apt-get update` and watch the output for any `404 Not Found` lines
+  pointing at `download.docker.com` — those mean the URL is wrong for the host.
 
 ### 2. Firewall and unattended upgrades
 
