@@ -174,6 +174,44 @@ HSTS_MAX_AGE=300
 APP_IMAGE=REPLACE_WITH_INITIAL_DIGEST_REF
 ```
 
+### 4b. GHCR pull credentials for the deploy user
+
+GHCR inherits visibility from the source repository, so `crm` images are
+private by default. The `crm-deploy` user must be authenticated against
+`ghcr.io` BEFORE the first deploy or `docker compose pull` returns
+`unauthorized`. There are two acceptable paths — pick one and stick with it.
+
+#### Path A — fine-grained PAT on the VPS (recommended for non-public stg)
+
+1. On the workstation, create a GitHub fine-grained PAT scoped to:
+   - account: `pericles-luz`
+   - repository access: `Only select repositories` → `crm`
+   - permissions: `Repository → Metadata: Read-only`,
+     `Account → Packages: Read-only`
+2. Copy the token (it starts with `github_pat_…`) and run on the VPS:
+   ```bash
+   GHCR_USER="pericles-luz"
+   GHCR_TOKEN="REPLACE_WITH_FINE_GRAINED_PAT"
+   sudo -u crm-deploy bash -c "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin"
+   ```
+   That writes `~crm-deploy/.docker/config.json` with the encoded
+   credential. Subsequent `docker compose pull` runs as `crm-deploy` reuse
+   the same file silently.
+3. Rotation: regenerate the PAT and re-run the `docker login` line. Old
+   tokens revoke automatically once superseded.
+
+#### Path B — make the GHCR package public
+
+If staging-image visibility is acceptable (no embedded secrets, no
+proprietary code beyond what is already inferred from the public
+distroless+Go binary): visit
+`https://github.com/users/pericles-luz/packages/container/crm/settings`,
+scroll to `Danger zone → Change visibility`, switch to `Public`. After that
+no `docker login` is needed on the VPS — anonymous pulls succeed.
+
+The CD workflow does not care which path you picked; it pushes with
+`secrets.GITHUB_TOKEN` either way.
+
 ### 5. First boot
 
 The CD pipeline only takes over once the VPS already runs at least one
