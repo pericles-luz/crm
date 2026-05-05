@@ -63,7 +63,11 @@ services:
     image: nats:2.10.22-alpine3.20@sha256:73b0ba5fec5518c5f698597c58d2a3350a2b5ccae43e84c308f8d2da1242deca
     restart: unless-stopped
     networks: [crm]
-    command: ["-js", "-sd", "/data"]
+    # `-m 8222` is REQUIRED — without it nats-server never opens the HTTP
+    # monitoring listener and the /healthz probe below fails forever
+    # (nats-docker upstream defaults monitoring to OFF). 8222 stays internal
+    # to the crm network; we never publish it on the host.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes: [nats-data:/data]
     healthcheck:
       <<: *hd
