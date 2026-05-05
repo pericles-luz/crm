@@ -121,12 +121,32 @@ deploy script:
 # on a workstation (or vault host)
 ssh-keygen -t ed25519 -C "github-actions cd-stg" -f cd-stg-ed25519 -N ""
 
-# copy cd-stg-ed25519.pub to the VPS, then on the VPS:
-cat <<'AUTH' > /home/crm-deploy/.ssh/authorized_keys
-command="/opt/crm/stg/bin/deploy.sh",no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc ssh-ed25519 AAAA…<paste cd-stg-ed25519.pub here>
+# Print the entire pubkey on a single line — copy this whole line to the
+# clipboard. It already starts with `ssh-ed25519 AAAA…` and ends with the
+# comment `github-actions cd-stg`; do NOT add `ssh-ed25519 ` again on the VPS.
+cat cd-stg-ed25519.pub
+```
+
+Then on the VPS, paste the entire pubkey into a single shell variable and
+let the heredoc interpolate it. Using a variable instead of a literal
+placeholder prevents the common footgun of half-replacing the placeholder
+and ending up with `ssh-ed25519 AAAA…ssh-ed25519 AAAA<real-key>`, which sshd
+silently rejects.
+
+```bash
+# Replace REPLACE_… with the EXACT contents of cd-stg-ed25519.pub from the
+# workstation — one line, starts with `ssh-ed25519 `, ends with the comment.
+PUBKEY="REPLACE_WITH_ENTIRE_LINE_FROM_cd-stg-ed25519.pub"
+cat > /home/crm-deploy/.ssh/authorized_keys <<AUTH
+command="/opt/crm/stg/bin/deploy.sh",no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc ${PUBKEY}
 AUTH
 chown crm-deploy:crm-deploy /home/crm-deploy/.ssh/authorized_keys
 chmod 600 /home/crm-deploy/.ssh/authorized_keys
+
+# Sanity: file should have exactly one line, no `AAAA…` literal, and exactly
+# one occurrence of `ssh-ed25519 `:
+test "$(grep -c 'ssh-ed25519 ' /home/crm-deploy/.ssh/authorized_keys)" = "1" \
+  || { echo "authorized_keys malformed: pub key duplicated or placeholder kept"; exit 1; }
 ```
 
 The private half goes into the GitHub repo's `STG_SSH_KEY` secret. Once the
