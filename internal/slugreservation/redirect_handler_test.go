@@ -40,33 +40,27 @@ func TestRedirectHandler_Redirects(t *testing.T) {
 
 func TestRedirectHandler_FallsThrough(t *testing.T) {
 	t.Parallel()
-	svc, _, _, _, _ := newSvc(t, time.Now())
-	called := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-	h := slugreservation.NewRedirectHandler(svc, "crm.example.test", next)
-
 	cases := []string{
-		"acme.crm.example.test",      // no redirect record
-		"crm.example.test",           // primary host itself
-		"acme.bar.example.test",      // wrong primary
-		"a.b.crm.example.test",       // nested label not allowed
-		"",                           // empty host
+		"acme.crm.example.test", // no redirect record
+		"crm.example.test",      // primary host itself
+		"acme.bar.example.test", // wrong primary
+		"a.b.crm.example.test",  // nested label not allowed
+		"",                      // empty host
 	}
 	for _, host := range cases {
 		host := host
 		t.Run(host, func(t *testing.T) {
 			t.Parallel()
-			called = false
+			svc, _, _, _, _ := newSvc(t, time.Now())
+			var called bool
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+			h := slugreservation.NewRedirectHandler(svc, "crm.example.test", next)
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.Host = host
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, r)
-			if !called && host != "" { // empty host falls through, but called will be true once next runs
-				// Empty host path also calls next; we only assert next ran for all cases.
-			}
+			h.ServeHTTP(httptest.NewRecorder(), r)
 			if !called {
 				t.Fatalf("next not called for host %q", host)
 			}

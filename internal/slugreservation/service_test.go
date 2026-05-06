@@ -146,7 +146,6 @@ func TestNewService_RequiresPorts(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			if _, err := slugreservation.NewService(tc.store, tc.red, tc.audit, tc.slack, nil); err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -308,10 +307,6 @@ func TestOverrideRelease_HappyPath(t *testing.T) {
 
 func TestOverrideRelease_Validation(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
-	svc, store, _, _, _ := newSvc(t, now)
-	store.rows["acme"] = slugreservation.Reservation{Slug: "acme", ExpiresAt: now.Add(time.Hour)}
-
 	cases := []struct {
 		name    string
 		slug    string
@@ -328,6 +323,9 @@ func TestOverrideRelease_Validation(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+			svc, store, _, _, _ := newSvc(t, now)
+			store.rows["acme"] = slugreservation.Reservation{Slug: "acme", ExpiresAt: now.Add(time.Hour)}
 			_, err := svc.OverrideRelease(context.Background(), tc.slug, tc.master, tc.reason)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err=%v want=%v", err, tc.wantErr)
@@ -414,10 +412,9 @@ func TestRecordRedirect(t *testing.T) {
 
 func TestRecordRedirect_Validation(t *testing.T) {
 	t.Parallel()
-	svc, _, _, _, _ := newSvc(t, time.Now())
 	cases := []struct {
-		name           string
-		old, new       string
+		name     string
+		old, new string
 	}{
 		{"old invalid", "BAD!", "acme-2"},
 		{"new invalid", "acme", "BAD!"},
@@ -427,6 +424,7 @@ func TestRecordRedirect_Validation(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			svc, _, _, _, _ := newSvc(t, time.Now())
 			if _, err := svc.RecordRedirect(context.Background(), tc.old, tc.new); !errors.Is(err, slugreservation.ErrInvalidSlug) {
 				t.Fatalf("err=%v", err)
 			}

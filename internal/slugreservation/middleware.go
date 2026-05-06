@@ -97,4 +97,3 @@ func PathValueExtractor(name string) SlugExtractor {
 		return v, true
 	}
 }
-

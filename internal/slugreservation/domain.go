@@ -38,12 +38,12 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 // Store.Active to feed both the middleware 409 response and the master
 // console.
 type Reservation struct {
-	ID                  uuid.UUID
-	Slug                string
-	ReleasedAt          time.Time
-	ReleasedByTenantID  uuid.UUID // uuid.Nil when forensic pointer unknown.
-	ExpiresAt           time.Time
-	CreatedAt           time.Time
+	ID                 uuid.UUID
+	Slug               string
+	ReleasedAt         time.Time
+	ReleasedByTenantID uuid.UUID // uuid.Nil when forensic pointer unknown.
+	ExpiresAt          time.Time
+	CreatedAt          time.Time
 }
 
 // Redirect describes an active slug redirect row.

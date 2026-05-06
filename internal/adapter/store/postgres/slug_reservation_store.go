@@ -27,13 +27,15 @@ func NewSlugReservationStore(db PgxConn) *SlugReservationStore {
 }
 
 // activeSelectSQL reads the currently-active reservation for the slug.
-// The partial unique index (tenant_slug_reservation_active_idx) makes
-// this an O(1) lookup; the predicate is identical so the planner uses
-// the index without needing the seq scan.
+// "Active" = master has not released it AND it has not naturally expired.
+// The partial unique index (tenant_slug_reservation_active_idx) covers
+// the master-released predicate; the planner adds the expires_at filter.
 const activeSelectSQL = `
 SELECT id, slug, released_at, released_by_tenant_id, expires_at, created_at
   FROM tenant_slug_reservation
- WHERE slug = $1 AND expires_at > now()
+ WHERE slug = $1
+   AND released_by_master IS FALSE
+   AND expires_at > now()
  LIMIT 1
 `
 
@@ -76,13 +78,16 @@ func (s *SlugReservationStore) Insert(ctx context.Context, slug string, byTenant
 	return res, nil
 }
 
-// reservationSoftDeleteSQL stamps expires_at = $2 (now()) on the active
-// row. RETURNING fires when a row matched; if no rows update the call
-// returns ErrNotReserved.
+// reservationSoftDeleteSQL flips released_by_master and stamps
+// expires_at = $2 (now()) on the active row. RETURNING fires when a row
+// matched; if no rows update the call returns ErrNotReserved.
 const reservationSoftDeleteSQL = `
 UPDATE tenant_slug_reservation
-   SET expires_at = $2
- WHERE slug = $1 AND expires_at > $2
+   SET expires_at = $2,
+       released_by_master = TRUE
+ WHERE slug = $1
+   AND released_by_master IS FALSE
+   AND expires_at > $2
 RETURNING id, slug, released_at, released_by_tenant_id, expires_at, created_at
 `
 
