@@ -30,17 +30,17 @@ import (
 // sidecar is also blocked here, and vice versa.
 var blockedPrefixes = func() []netip.Prefix {
 	raw := []string{
-		"10.0.0.0/8",       // RFC 1918
-		"172.16.0.0/12",    // RFC 1918
-		"192.168.0.0/16",   // RFC 1918
-		"127.0.0.0/8",      // loopback
-		"169.254.0.0/16",   // link-local incl. AWS/GCP IMDS 169.254.169.254
-		"100.64.0.0/10",    // RFC 6598 CGNAT
-		"0.0.0.0/8",        // "this network", RFC 1122
-		"224.0.0.0/4",      // multicast
-		"::1/128",          // IPv6 loopback
-		"fc00::/7",         // IPv6 unique-local (RFC 4193)
-		"fe80::/10",        // IPv6 link-local
+		"10.0.0.0/8",     // RFC 1918
+		"172.16.0.0/12",  // RFC 1918
+		"192.168.0.0/16", // RFC 1918
+		"127.0.0.0/8",    // loopback
+		"169.254.0.0/16", // link-local incl. AWS/GCP IMDS 169.254.169.254
+		"100.64.0.0/10",  // RFC 6598 CGNAT
+		"0.0.0.0/8",      // "this network", RFC 1122
+		"224.0.0.0/4",    // multicast
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 unique-local (RFC 4193)
+		"fe80::/10",      // IPv6 link-local
 	}
 	out := make([]netip.Prefix, 0, len(raw))
 	for _, s := range raw {

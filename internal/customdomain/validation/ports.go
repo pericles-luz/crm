@@ -46,12 +46,12 @@ type AuditEvent struct {
 // (must be exported, must appear in this file, must be referenced from
 // validate.go) so reviewers see every new pathway.
 const (
-	EventValidatedOK         = "customdomain_validate_ok"
-	EventBlockedSSRF         = "customdomain_validate_blocked_ssrf"
-	EventTokenMismatch       = "customdomain_validate_token_mismatch"
-	EventNoAddress           = "customdomain_validate_no_address"
-	EventResolverError       = "customdomain_validate_resolver_error"
-	EventEmptyInput          = "customdomain_validate_empty_input"
+	EventValidatedOK   = "customdomain_validate_ok"
+	EventBlockedSSRF   = "customdomain_validate_blocked_ssrf"
+	EventTokenMismatch = "customdomain_validate_token_mismatch"
+	EventNoAddress     = "customdomain_validate_no_address"
+	EventResolverError = "customdomain_validate_resolver_error"
+	EventEmptyInput    = "customdomain_validate_empty_input"
 )
 
 // Clock is a 1-method port over time.Now so tests can pin VerifiedAt and
@@ -75,4 +75,3 @@ func (SystemClock) Now() time.Time { return time.Now().UTC() }
 type noopAuditor struct{}
 
 func (noopAuditor) Record(context.Context, AuditEvent) {}
-

@@ -54,7 +54,7 @@ func New(resolver dnsresolver.Resolver, auditor Auditor, clock Clock) *Validator
 //     We REJECT even when only one of N answers is blocked, because a
 //     mixed answer is a textbook DNS-rebinding setup.
 //   - No TXT under _crm-verify.<host> matches expectedToken → ErrTokenMismatch
-//     + EventTokenMismatch.
+//   - EventTokenMismatch.
 //   - Success → Result populated + EventValidatedOK.
 //
 // On success, Result.IP is the FIRST non-blocked IP returned by the

@@ -468,4 +468,3 @@ func TestValidate_TXTTokenIsTrimmed(t *testing.T) {
 		t.Fatalf("trimmed TXT should match: %v", err)
 	}
 }
-
