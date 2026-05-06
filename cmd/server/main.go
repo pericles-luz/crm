@@ -127,8 +127,27 @@ func executeAllWith(ctx context.Context, getenv func(string) string, dial dialFn
 }
 
 func run(ctx context.Context, addr string) error {
+	return runWith(ctx, addr, os.Getenv, defaultWebhookDial)
+}
+
+// runWith is the test-friendly variant of run. The dial seam lets unit
+// tests drive the SIN-62300 webhook wiring without Postgres; production
+// passes defaultWebhookDial via run().
+func runWith(ctx context.Context, addr string, getenv func(string) string, webhookDial webhookDial) error {
 	mux := newMux()
-	cdHandler, cdCleanup := buildCustomDomainHandler(ctx, os.Getenv)
+
+	// SIN-62300 webhook intake — registered before the custom-domain
+	// catch-all so the routing order is obvious to a reader. Go 1.22+
+	// ServeMux already prefers the more-specific `POST /webhooks/...`
+	// pattern over `/`, but we register early on principle.
+	wh := buildWebhookWiringWithDeps(ctx, getenv, webhookDial)
+	if wh != nil {
+		defer wh.Cleanup()
+		wh.Register(mux)
+		log.Printf("crm: webhook intake mounted on public listener")
+	}
+
+	cdHandler, cdCleanup := buildCustomDomainHandler(ctx, getenv)
 	defer cdCleanup()
 	if cdHandler != nil {
 		// SIN-62259 routes are mounted at the root of the public mux. The
@@ -148,9 +167,41 @@ func run(ctx context.Context, addr string) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+
+	// SIN-62300 reconciler worker — runs alongside the HTTP server with
+	// the same context so the shutdown order is: ctx cancel → drain HTTP
+	// → wait for the worker to exit. The worker's sweep errors are
+	// non-fatal (next tick retries); only an unrecoverable runtime error
+	// surfaces here.
+	var (
+		workerWG  sync.WaitGroup
+		workerMu  sync.Mutex
+		workerErr error
+	)
+	if wh != nil && wh.RunWorker != nil {
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			if err := wh.RunWorker(ctx); err != nil {
+				workerMu.Lock()
+				if workerErr == nil {
+					workerErr = err
+				}
+				workerMu.Unlock()
+			}
+		}()
+	}
+
 	log.Printf("crm: public listener on %s", addr)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		return err
+	srvErr := srv.ListenAndServe()
+	workerWG.Wait()
+	if srvErr != nil && !errors.Is(srvErr, http.ErrServerClosed) {
+		return srvErr
+	}
+	workerMu.Lock()
+	defer workerMu.Unlock()
+	if workerErr != nil {
+		return fmt.Errorf("webhook reconciler: %w", workerErr)
 	}
 	return nil
 }
