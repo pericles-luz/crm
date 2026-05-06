@@ -25,6 +25,7 @@ RUN go mod download
 # Source layer.
 COPY cmd ./cmd
 COPY internal ./internal
+COPY adapters ./adapters
 
 # CGO_ENABLED=0 + -trimpath + -ldflags="-s -w" yields a small, reproducible,
 # statically linked binary. GOFLAGS prevents the toolchain from auto-downloading
