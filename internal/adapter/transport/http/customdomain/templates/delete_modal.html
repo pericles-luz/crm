@@ -12,7 +12,7 @@
           hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
           hx-target="#domain-list"
           hx-swap="outerHTML"
-          hx-on:htmx:after-request="document.getElementById('wizard').innerHTML = ''">
+          data-close-on-success="#wizard">
       <label for="confirm-host">Digite <code>{{.Host}}</code> para confirmar</label>
       <input id="confirm-host"
              name="confirm"
@@ -27,7 +27,7 @@
         <button type="button"
                 class="btn btn-ghost"
                 aria-label="Cancelar exclusão"
-                hx-on:click="document.getElementById('wizard').innerHTML = ''">
+                data-close-target="#wizard">
           Cancelar
         </button>
         <button type="submit"

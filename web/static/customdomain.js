@@ -1,15 +1,20 @@
 // Custom-domain wizard interactions.
 //
-// SIN-62237 / F29 — replaces the inline onclick / hx-on:click handlers
-// previously embedded in wizard_step2.html so the page can ship under a
-// strict Content-Security-Policy ("script-src 'self' 'nonce-{N}'", no
-// 'unsafe-inline'). The handlers below attach via addEventListener and
-// drive the same behaviours via data-* attributes:
+// SIN-62237 / F29 — replaces the inline onclick / hx-on:* handlers
+// previously embedded in the customdomain templates so every page can
+// ship under the strict Content-Security-Policy emitted by the csp
+// middleware ("script-src 'self' 'nonce-{N}'", no 'unsafe-inline', no
+// 'unsafe-eval'). htmx 2.x evaluates `hx-on:*` attributes via
+// `new Function(...)` which CSP's `'unsafe-eval'` gate blocks; this
+// module delegates the same behaviours via data-* attributes instead:
 //
-//   - data-copy-target="<id>"  — clicking the button copies the
-//     trimmed textContent of the element with that id to the clipboard.
-//   - data-close-target="<sel>"— clicking the button empties the
-//     innerHTML of the element matched by that querySelector string.
+//   - data-copy-target="<id>"            click → copy the trimmed
+//     textContent of the element with that id to the clipboard.
+//   - data-close-target="<sel>"          click → empty innerHTML of
+//     the element matched by querySelector(sel).
+//   - data-close-on-success="<sel>"      htmx:afterRequest with a
+//     successful response → empty innerHTML of querySelector(sel).
+//     Use on the <form>/element that issues the htmx request.
 //
 // Event delegation on document keeps the wiring resilient when HTMX
 // swaps wizard fragments in and out.
@@ -49,6 +54,34 @@
           dst.innerHTML = '';
         }
       }
+    }
+  });
+
+  // htmx:afterRequest fires once on the element that issued the request.
+  // We close the linked container only when the response was successful
+  // (2xx). The htmx CustomEvent carries a `successful` flag on
+  // event.detail; falling back to detail.xhr.status protects against an
+  // older htmx that doesn't populate that helper.
+  document.addEventListener('htmx:afterRequest', function (event) {
+    var el = event.target;
+    if (!el || !el.hasAttribute || !el.hasAttribute('data-close-on-success')) {
+      return;
+    }
+    var detail = event.detail || {};
+    var ok = detail.successful === true;
+    if (!ok && detail.xhr && typeof detail.xhr.status === 'number') {
+      ok = detail.xhr.status >= 200 && detail.xhr.status < 300;
+    }
+    if (!ok) {
+      return;
+    }
+    var selector = el.getAttribute('data-close-on-success');
+    if (!selector) {
+      return;
+    }
+    var dst = document.querySelector(selector);
+    if (dst) {
+      dst.innerHTML = '';
     }
   });
 })();
