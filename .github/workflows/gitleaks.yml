@@ -1,0 +1,74 @@
+# Secret-scanning gate for SIN-62299.
+#
+# Runs gitleaks against every PR and every push to main with the project's
+# custom ruleset (.gitleaks.toml — Meta Cloud, Instagram Graph, Meta App
+# Secret, WhatsApp verify_token rules). Fail-closed: any finding blocks merge.
+#
+# Why direct binary invocation instead of `gitleaks/gitleaks-action@v2`:
+# the v2 action hardcodes `--exit-code=2` and on `pull_request`/`push` events
+# scopes `--log-opts` to the diff range — neither matches the SIN-62299 spec
+# (`--exit-code=1` and `--log-opts="--all"`). Running the binary directly
+# pins the version, makes the args auditable in this file, and ensures
+# orphan-history branches merged via `--allow-unrelated-histories` cannot
+# smuggle leaks past the gate the way the SIN-62297 bridge surfaced.
+#
+# This workflow MUST NOT be soft-failed. Future false positives are addressed
+# by tightening the rule or extending the [allowlist] in .gitleaks.toml,
+# never by disabling this job.
+
+name: gitleaks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    env:
+      # Pin the binary so a compromised upstream release cannot silently
+      # weaken the gate. Bump version + sha together when upgrading.
+      GITLEAKS_VERSION: "8.21.2"
+      GITLEAKS_SHA256: "5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so --log-opts="--all" can scan every commit, including
+          # orphan-history branches merged via --allow-unrelated-histories.
+          fetch-depth: 0
+
+      - name: install gitleaks (pinned + sha256-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x ./gitleaks
+          ./gitleaks version
+
+      - name: gitleaks detect (--log-opts=--all, --exit-code=1)
+        run: |
+          set -euo pipefail
+          ./gitleaks detect \
+            --config=.gitleaks.toml \
+            --log-opts=--all \
+            --exit-code=1 \
+            --redact \
+            --verbose \
+            --report-format=sarif \
+            --report-path=gitleaks-report.sarif
+
+      - name: upload SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.sarif
+          if-no-files-found: ignore
