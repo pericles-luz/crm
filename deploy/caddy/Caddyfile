@@ -26,3 +26,34 @@
 
 	encode zstd gzip
 }
+
+# SIN-62243 F45 — global on_demand_tls policy. Caddy consults the app's
+# internal listener at app:8081/internal/tls/ask before issuing a cert
+# for any custom domain (any host that does not match a literal site
+# block above). The internal listener is unpublished — only the docker
+# bridge network can reach :8081 — so a request for /internal/tls/ask
+# arriving at this Caddy from the public internet hits a literal site
+# block and never reaches the ask handler.
+{
+	on_demand_tls {
+		ask http://app:8081/internal/tls/ask
+		# Modest per-host issuance burst so a single domain cannot
+		# exhaust Let's Encrypt's per-account quota; the app's own
+		# Redis-backed sliding window is the primary limit (3/min).
+		burst 3
+	}
+}
+
+# Custom-domain catch-all: any host the SNI client presents that is NOT
+# in the literal site blocks above lands here. Caddy consults
+# on_demand_tls.ask above; only verified, non-paused hosts are allowed
+# through to the app. tls { on_demand } MUST be paired with the global
+# on_demand_tls policy or Caddy will refuse to issue.
+:443 {
+	tls {
+		on_demand
+	}
+	import security-headers.caddy
+	reverse_proxy app:8080
+	encode zstd gzip
+}
