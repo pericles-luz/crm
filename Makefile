@@ -1,11 +1,19 @@
 # CRM — Fase 0 Makefile (SIN-62208).
-# Targets: up, down, logs, test, test-integration, lint, migrate-up,
-#          migrate-down, seed-stg, smoke-alert.
+# Targets: up, down, logs, test, test-integration, test-integration-cover,
+#          lint, lint-aicache, notenant, migrate-up, migrate-down, seed-stg,
+#          smoke-alert, verify-vendor.
 
 SHELL := /bin/bash
 COMPOSE_DIR := deploy/compose
 COMPOSE := docker compose --project-directory $(COMPOSE_DIR) -f $(COMPOSE_DIR)/compose.yml
 GO ?= go
+NOTENANT_BIN := $(CURDIR)/bin/notenant
+
+# golang-migrate CLI shipped as a one-shot container; see migrations/*.sql
+# (SIN-62209). Versioned so CI and devs share the same binary.
+MIGRATE_IMAGE := migrate/migrate:v4.17.1
+MIGRATIONS_DIR := $(CURDIR)/migrations
+COMPOSE_NETWORK := crm_crm
 
 # Integration test coverage threshold (SIN-62277 acceptance criterion).
 # The webhook stack + its adapters must clear this bar measured across
@@ -16,7 +24,8 @@ ITEST_COVER_THRESHOLD ?= 85.0
 .DEFAULT_GOAL := help
 
 .PHONY: help up down logs test test-integration test-integration-cover \
-        lint migrate-up migrate-down seed-stg smoke-alert
+        lint lint-aicache notenant migrate-up migrate-down seed-stg \
+        smoke-alert verify-vendor
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -68,17 +77,50 @@ test-integration-cover: ## Run unit + integration with combined coverage and enf
 			exit 1; \
 		}
 
-lint: ## Run go vet (staticcheck wired in PR8)
+lint: notenant ## Run go vet + the notenant analyzer over internal/ (SIN-62232 / ADR 0071)
 	$(GO) vet ./...
+	$(GO) vet -vettool=$(NOTENANT_BIN) ./internal/...
 
-migrate-up: ## Apply DB migrations (wired in PR2 with goose)
-	@echo "migrate-up: stub — PR2 (SIN Fase 0) wires goose against postgres service"
+notenant: ## Build the notenant analyzer binary into bin/ (SIN-62232 / ADR 0071)
+	$(GO) build -o $(NOTENANT_BIN) ./tools/lint/notenant/cmd/notenant
 
-migrate-down: ## Rollback the most recent DB migration (wired in PR2)
-	@echo "migrate-down: stub — PR2 (SIN Fase 0) wires goose against postgres service"
+lint-aicache: ## Run the SIN-62236 aicache analyzer over internal/ai/ as a vet tool
+	$(GO) build -o ./bin/aicache ./cmd/aicache
+	$(GO) vet -vettool=$(CURDIR)/bin/aicache ./internal/ai/...
 
-seed-stg: ## Seed staging fixtures (wired in PR2)
-	@echo "seed-stg: stub — PR2 (SIN Fase 0) provides staging seed"
+migrate-up: ## Apply all DB migrations against the compose Postgres (SIN-62209)
+	@if [ ! -f $(COMPOSE_DIR)/.env ]; then \
+		echo "missing $(COMPOSE_DIR)/.env — copy .env.example and fill secrets"; exit 1; \
+	fi
+	set -a; . $(COMPOSE_DIR)/.env; set +a; \
+	docker run --rm --network $(COMPOSE_NETWORK) \
+		-v $(MIGRATIONS_DIR):/migrations:ro \
+		$(MIGRATE_IMAGE) -path /migrations \
+		-database "postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/$$POSTGRES_DB?sslmode=disable" \
+		up
+
+migrate-down: ## Roll back ALL DB migrations (destructive; SIN-62209)
+	@if [ ! -f $(COMPOSE_DIR)/.env ]; then \
+		echo "missing $(COMPOSE_DIR)/.env"; exit 1; \
+	fi
+	set -a; . $(COMPOSE_DIR)/.env; set +a; \
+	docker run --rm --network $(COMPOSE_NETWORK) \
+		-v $(MIGRATIONS_DIR):/migrations:ro \
+		$(MIGRATE_IMAGE) -path /migrations \
+		-database "postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/$$POSTGRES_DB?sslmode=disable" \
+		down -all
+
+seed-stg: ## Apply staging seed fixtures (idempotent; SIN-62209)
+	@if [ ! -f $(COMPOSE_DIR)/.env ]; then \
+		echo "missing $(COMPOSE_DIR)/.env"; exit 1; \
+	fi
+	set -a; . $(COMPOSE_DIR)/.env; set +a; \
+	$(COMPOSE) exec -T postgres \
+		psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+		< $(MIGRATIONS_DIR)/seed/stg.sql
 
 smoke-alert: ## Inject a synthetic alert into Slack #alerts (wired in PR10)
 	@echo "smoke-alert: stub — PR10 (SIN Fase 0) implements Slack injection"
+
+verify-vendor: ## Verify SRI sha-384 hashes for web/static/vendor/** (SIN-62284)
+	./scripts/verify-vendor-checksums.sh

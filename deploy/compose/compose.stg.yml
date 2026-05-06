@@ -1,0 +1,137 @@
+# Staging stack for the multi-tenant CRM — Fase 0 PR9 (SIN-62215).
+#
+# Contract with .github/workflows/cd-stg.yml:
+#   1. The CD job builds ghcr.io/pericles-luz/crm and resolves the pushed digest.
+#   2. It SSHes to the VPS and writes APP_IMAGE=ghcr.io/pericles-luz/crm@sha256:<d>
+#      into /opt/crm/stg/.env.stg (alongside the secrets that already live there).
+#   3. `docker compose -f compose.stg.yml pull && up -d --remove-orphans` then
+#      converges the stack on the new digest.
+#
+# Image pinning policy (CEO follow-up on SIN-62208, AC #6 of SIN-62215):
+#   - The app is referenced strictly by digest via APP_IMAGE — the variable form
+#     is mandatory; compose fails fast if it is unset (`?required` syntax).
+#   - Every infra image (postgres, caddy, redis, nats, minio) is pinned to a
+#     versioned tag AND a SHA256 digest, so docker resolves by digest. The tag
+#     is kept inline for human readability.
+#   - Verification: `grep -E ':(latest|alpine)$' deploy/compose/compose.stg.yml`
+#     MUST return zero lines. Bumping a digest is documented in
+#     docs/deploy/staging.md → "Bumping infra image digests".
+
+name: crm-stg
+
+networks:
+  crm: { driver: bridge }
+
+volumes:
+  postgres-data: {}
+  redis-data: {}
+  nats-data: {}
+  minio-data: {}
+  caddy-data: {}
+  caddy-config: {}
+
+x-healthdefaults: &hd
+  interval: 5s
+  timeout: 3s
+  retries: 10
+
+services:
+  postgres:
+    image: postgres:16.4-alpine3.19@sha256:fca1f7c402bfedceed5537c7b0c85e6b30cec43414d3fa3ef7a48b946c46bf3c
+    restart: unless-stopped
+    networks: [crm]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-crm}
+      POSTGRES_USER: ${POSTGRES_USER:-crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set in /opt/crm/stg/.env.stg}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      <<: *hd
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm} -d ${POSTGRES_DB:-crm}"]
+
+  redis:
+    image: redis:7.4.1-alpine3.20@sha256:c1e88455c85225310bbea54816e9c3f4b5295815e6dbf80c34d40afc6df28275
+    restart: unless-stopped
+    networks: [crm]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      <<: *hd
+      test: ["CMD", "redis-cli", "ping"]
+
+  nats:
+    image: nats:2.10.22-alpine3.20@sha256:73b0ba5fec5518c5f698597c58d2a3350a2b5ccae43e84c308f8d2da1242deca
+    restart: unless-stopped
+    networks: [crm]
+    # `-m 8222` is REQUIRED — without it nats-server never opens the HTTP
+    # monitoring listener and the /healthz probe below fails forever
+    # (nats-docker upstream defaults monitoring to OFF). 8222 stays internal
+    # to the crm network; we never publish it on the host.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes: [nats-data:/data]
+    healthcheck:
+      <<: *hd
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
+    restart: unless-stopped
+    networks: [crm]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER not set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD not set}
+    volumes: [minio-data:/data]
+    healthcheck:
+      <<: *hd
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
+
+  app:
+    # APP_IMAGE is rewritten into /opt/crm/stg/.env.stg by the CD workflow each
+    # deploy. Format: ghcr.io/pericles-luz/crm@sha256:<digest>.
+    image: ${APP_IMAGE:?APP_IMAGE must be ghcr.io/pericles-luz/crm@sha256:<digest>}
+    restart: unless-stopped
+    networks: [crm]
+    env_file: .env.stg
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crm}?sslmode=disable}
+    # No in-container healthcheck: distroless ships no shell/curl/wget. The
+    # external smoke check in cd-stg.yml (curl https://.../health) is the
+    # authoritative liveness gate; Caddy + restart:unless-stopped recover from
+    # transient failures.
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  caddy:
+    image: caddy:2.8.4-alpine3.20@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
+    restart: unless-stopped
+    networks: [crm]
+    ports: ["80:80", "443:443"]
+    # Override Caddy's default `--config /etc/caddy/Caddyfile` so the local-dev
+    # Caddyfile (auto_https off, *.crm.local) doesn't get used in stg. The stg
+    # variant turns auto_https back on and picks site addresses from
+    # $STG_TENANT_HOSTS.
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.stg", "--adapter", "caddyfile"]
+    environment:
+      # In stg the soak window is short (rollback < 5 min); production
+      # overrides this in Fase 1 per ADR 0082 §1 (SIN-62229).
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
+      # Let's Encrypt account contact + the comma-separated FQDN list Caddy
+      # provisions certs for. Both come from /opt/crm/stg/.env.stg via
+      # --env-file. Required (compose fails fast if missing).
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL not set in /opt/crm/stg/.env.stg}
+      STG_TENANT_HOSTS: ${STG_TENANT_HOSTS:?STG_TENANT_HOSTS not set in /opt/crm/stg/.env.stg}
+    volumes:
+      # `./caddy` resolves against the directory containing this compose
+      # file, i.e. /opt/crm/stg/caddy/ on the VPS. The local-dev compose.yml
+      # uses `../caddy` because deploy/compose/ and deploy/caddy/ are
+      # peers in the source tree; on stg the operator scps both files into
+      # the single /opt/crm/stg/caddy/ directory (see staging.md §4).
+      - ./caddy:/etc/caddy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [app]

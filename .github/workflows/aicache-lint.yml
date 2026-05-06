@@ -1,0 +1,41 @@
+# CI gate for SIN-62236 (ADR 0077 §3.4): runs the aicache analyzer's
+# analysistest fixtures and then drives the analyzer over the real
+# internal/ai/ tree as a `go vet` tool. Either step failing blocks merge.
+name: aicache-lint
+
+on:
+  pull_request:
+    paths:
+      - "internal/ai/**"
+      - "internal/lint/aicache/**"
+      - "cmd/aicache/**"
+      - ".github/workflows/aicache-lint.yml"
+      - "go.mod"
+      - "go.sum"
+  push:
+    branches: [main]
+
+jobs:
+  aicache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: analysistest fixtures (positive + negative cases)
+        run: go test ./internal/lint/aicache/... -count=1
+
+      - name: build aicache vet tool
+        run: go build -o ./bin/aicache ./cmd/aicache
+
+      - name: run analyzer over internal/ai
+        run: go vet -vettool=$(pwd)/bin/aicache ./internal/ai/...
+
+      - name: full Go vet
+        run: go vet ./...
+
+      - name: full test suite (race + cover)
+        run: go test ./... -race -count=1 -cover

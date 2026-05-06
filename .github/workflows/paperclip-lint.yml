@@ -1,0 +1,73 @@
+# CI gate for SIN-62276 (ADR 0075 §2 D2 / §5):
+#
+# Runs the paperclip-lint analyzers' analystest fixtures and then drives
+# the bundled multichecker over the real internal/webhook/ and
+# internal/adapter/ trees as a `go vet` tool. Either step failing blocks
+# merge.
+#
+# The lint can be temporarily disabled in an emergency by setting the
+# repository variable PAPERCLIP_LINT_DISABLED=1 — but the box on the
+# corresponding tracking issue MUST be checked, with a justification, and
+# the suspension reverted in <24h. (Reversibility lens, ADR 0075.)
+name: paperclip-lint
+
+on:
+  pull_request:
+    paths:
+      - "internal/webhook/**"
+      - "internal/adapter/**"
+      - "tools/lint/**"
+      - "cmd/paperclip-lint/**"
+      - ".github/workflows/paperclip-lint.yml"
+      - "go.mod"
+      - "go.sum"
+  push:
+    branches: [main]
+
+jobs:
+  paperclip-lint:
+    runs-on: ubuntu-latest
+    if: ${{ vars.PAPERCLIP_LINT_DISABLED != '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: analystest fixtures (positive + negative cases)
+        run: go test ./tools/lint/nobodyreread/... ./tools/lint/nomathrand/... ./tools/lint/nosecrets/... -count=1 -race -cover
+
+      - name: build paperclip-lint vet tool
+        run: go build -o ./bin/paperclip-lint ./cmd/paperclip-lint
+
+      - name: run paperclip-lint over webhook + adapter trees
+        run: |
+          # On a fresh branch the webhook tree may not exist yet — list the
+          # targets that DO exist before invoking go vet so the workflow is
+          # green for branches that haven't landed the production code path.
+          targets=()
+          for p in ./internal/webhook/... ./internal/adapter/...; do
+            dir="${p%/...}"
+            if [ -d "$dir" ]; then
+              targets+=("$p")
+            fi
+          done
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "no webhook/adapter targets present on this branch — skipping vet step"
+            exit 0
+          fi
+          go vet -vettool=$(pwd)/bin/paperclip-lint "${targets[@]}"
+
+      - name: enforce >=85% coverage on tools/lint/{nobodyreread,nomathrand,nosecrets}
+        run: |
+          go test ./tools/lint/nobodyreread/... ./tools/lint/nomathrand/... ./tools/lint/nosecrets/... \
+            -count=1 \
+            -coverpkg=./tools/lint/nobodyreread,./tools/lint/nomathrand,./tools/lint/nosecrets \
+            -coverprofile=coverage.out
+          pct=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$3); print $3}')
+          echo "coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit !(p+0 >= 85.0) }' || {
+            echo "coverage ${pct}% below 85% threshold (SIN-62276 quality bar)"
+            exit 1
+          }

@@ -1,0 +1,132 @@
+# Continuous Delivery to staging — Fase 0 PR9 (SIN-62215).
+#
+# Wakes on every successful run of the `ci` workflow on `main` (chained via
+# workflow_run). Builds the image, pushes it to GHCR, SSHes to the staging VPS,
+# updates the digest reference in /opt/crm/stg/.env.stg, runs `compose pull && up -d`,
+# and then performs an external smoke check from the GitHub runner.
+#
+# Failure model (AC #3 of SIN-62215): if the smoke check fails, the job is red,
+# the previous container keeps running (compose up -d --no-deps app fails fast),
+# and rollback is MANUAL. Auto-rollback is deferred to Fase 6 / a follow-up.
+#
+# Image policy: every image referenced by the staging stack — including the one
+# this workflow pushes — is consumed by digest, not by tag. See
+# deploy/compose/compose.stg.yml and the AC #6 grep.
+
+name: cd-stg
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cd-stg
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPO: ghcr.io/pericles-luz/crm
+
+jobs:
+  deploy-stg:
+    name: deploy-stg
+    runs-on: ubuntu-latest
+    # Only deploy when the CI run that triggered us was green.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 8
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_ref: ${{ steps.compose-ref.outputs.ref }}
+    steps:
+      - name: checkout main at the SHA that produced the green CI run
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build & push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ github.event.workflow_run.head_sha }}
+            ${{ env.IMAGE_REPO }}:main
+          # Inline cache keeps successive runs ~3 min faster than cold builds,
+          # which is what makes AC #2 (≤ 8 min wall) feasible on the standard runner.
+          cache-from: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache,mode=max
+          provenance: false
+
+      - name: compose APP_IMAGE reference
+        id: compose-ref
+        run: echo "ref=${IMAGE_REPO}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+      - name: install ssh client
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y openssh-client
+
+      - name: configure ssh
+        env:
+          STG_SSH_KEY: ${{ secrets.STG_SSH_KEY }}
+          STG_HOST: ${{ secrets.STG_HOST }}
+          STG_HOST_KEY: ${{ secrets.STG_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$STG_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # known_hosts populated from a secret so we never trust on first use.
+          # See docs/deploy/staging.md → "Capturing the staging host key".
+          printf '%s\n' "$STG_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: deploy via ssh
+        env:
+          STG_HOST: ${{ secrets.STG_HOST }}
+          STG_USER: ${{ secrets.STG_USER }}
+          APP_IMAGE_REF: ${{ steps.compose-ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # The remote constraint in /home/<user>/.ssh/authorized_keys runs
+          # /opt/crm/stg/bin/deploy.sh and ignores anything else, so we pipe
+          # the digest as the only argument that script accepts. See
+          # docs/deploy/staging.md → "Locking the deploy SSH key".
+          ssh -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              "${STG_USER}@${STG_HOST}" \
+              "deploy ${APP_IMAGE_REF}"
+
+      - name: smoke check /health
+        env:
+          STG_SMOKE_URL: ${{ secrets.STG_SMOKE_URL }}
+        run: |
+          set -euo pipefail
+          # Retry briefly: compose `up -d` returns once containers are started,
+          # but the app may still be booting. Total budget: 30s (6 * 5s).
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 5 "${STG_SMOKE_URL}/health" >/dev/null; then
+              echo "smoke check OK on attempt ${attempt}"
+              exit 0
+            fi
+            echo "smoke check attempt ${attempt} failed, retrying…"
+            sleep 5
+          done
+          echo "smoke check FAILED — manual rollback required (see docs/deploy/staging.md)"
+          exit 1

@@ -1,0 +1,33 @@
+# Caddy 2 config for staging (Fase 0 PR9 / SIN-62215).
+#
+# Differences from the local-dev Caddyfile:
+#   - auto_https stays ON (Caddy default). Caddy provisions Let's Encrypt
+#     certs via the HTTP-01 challenge for every site listed in
+#     $STG_TENANT_HOSTS. Certs persist across container restarts via the
+#     `caddy-data` volume mounted at /data.
+#   - $ACME_EMAIL is the Let's Encrypt account contact (issuance + expiry
+#     notifications go there). Required.
+#   - The local-only `:8080` listener is dropped: stg traffic only reaches
+#     the app via 80/443, and the wildcard `*.crm.local` pattern is replaced
+#     by the explicit hostnames the operator publishes via DNS.
+#
+# Required .env.stg vars:
+#   ACME_EMAIL         Let's Encrypt account contact, e.g. ops@example.com.
+#   STG_TENANT_HOSTS   Comma-separated FQDN list, e.g.
+#                      "acme.crm.<stg-domain>, globex.crm.<stg-domain>".
+#
+# DNS prerequisite: every hostname in STG_TENANT_HOSTS must already resolve
+# to the VPS public IP (`dig +short <host>` on a workstation should return
+# only that IP). Otherwise the HTTP-01 challenge times out and Caddy retries
+# in the background, leaving 443 unanswered for the duration.
+
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+{$STG_TENANT_HOSTS} {
+	import security-headers.caddy
+	reverse_proxy app:8080
+	encode zstd gzip
+}

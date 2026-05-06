@@ -48,7 +48,10 @@ services:
     image: nats:2-alpine
     restart: unless-stopped
     networks: [crm]
-    command: ["-js", "-sd", "/data"]
+    # `-m 8222` is REQUIRED — without it nats-server never opens the HTTP
+    # monitoring listener and the /healthz probe below fails forever
+    # (nats-docker upstream defaults monitoring to OFF).
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes: [nats-data:/data]
     healthcheck:
       <<: *hd
@@ -73,9 +76,20 @@ services:
     networks: [crm]
     working_dir: /src
     command: ["go", "run", "./cmd/server"]
+    # SIN-62212 / CEO review on PR1: the app container MUST NOT see
+    # deploy/compose/.env or any path outside the source tree. Secrets
+    # arrive via env_file (read by the docker daemon, never bind-mounted)
+    # and DATABASE_URL is composed at compose-up time. PR9 replaces the
+    # selective binds below with a multi-stage image build.
+    env_file: .env
     environment:
       HTTP_ADDR: ":8080"
-    volumes: [../../:/src:ro]
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crm}?sslmode=disable}
+    volumes:
+      - ../../go.mod:/src/go.mod:ro
+      - ../../go.sum:/src/go.sum:ro
+      - ../../cmd:/src/cmd:ro
+      - ../../internal:/src/internal:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -87,8 +101,14 @@ services:
     restart: unless-stopped
     networks: [crm]
     ports: ["80:80", "443:443", "8080:8080"]
+    environment:
+      # Fase 0 default mirrors staging so a bad header rolls back in < 5 min.
+      # Fase 1 production overrides to 63072000 (ADR 0082 / SIN-62229).
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
     volumes:
-      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount the directory (not just the Caddyfile) so the security-headers
+      # import in deploy/caddy/security-headers.caddy resolves inside the container.
+      - ../caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [app]
