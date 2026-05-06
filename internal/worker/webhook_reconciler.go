@@ -11,17 +11,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/pericles-luz/crm/internal/webhook"
 )
-
-// ReconcilerDB is the narrow pgx surface needed by the reconciler. The
-// store is decoupled so unit tests can drive it without a live DB.
-type ReconcilerDB interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	Exec(ctx context.Context, sql string, args ...any) (any, error)
-}
 
 // UnpublishedRow is the per-row payload the reconciler hands to the
 // publisher. We re-parse jsonb headers via a thin adapter rather than
