@@ -1,13 +1,14 @@
 # CRM — Fase 0 Makefile (SIN-62208).
 # Targets: up, down, logs, test, test-integration, test-integration-cover,
-#          lint, lint-aicache, notenant, migrate-up, migrate-down, seed-stg,
-#          smoke-alert, verify-vendor.
+#          lint, lint-aicache, lint-imports, notenant, forbidimport,
+#          migrate-up, migrate-down, seed-stg, smoke-alert, verify-vendor.
 
 SHELL := /bin/bash
 COMPOSE_DIR := deploy/compose
 COMPOSE := docker compose --project-directory $(COMPOSE_DIR) -f $(COMPOSE_DIR)/compose.yml
 GO ?= go
 NOTENANT_BIN := $(CURDIR)/bin/notenant
+FORBIDIMPORT_BIN := $(CURDIR)/bin/forbidimport
 
 # golang-migrate CLI shipped as a one-shot container; see migrations/*.sql
 # (SIN-62209). Versioned so CI and devs share the same binary.
@@ -24,8 +25,8 @@ ITEST_COVER_THRESHOLD ?= 85.0
 .DEFAULT_GOAL := help
 
 .PHONY: help up down logs test test-integration test-integration-cover \
-        lint lint-aicache notenant migrate-up migrate-down seed-stg \
-        smoke-alert verify-vendor
+        lint lint-aicache lint-imports notenant forbidimport \
+        migrate-up migrate-down seed-stg smoke-alert verify-vendor
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -77,12 +78,18 @@ test-integration-cover: ## Run unit + integration with combined coverage and enf
 			exit 1; \
 		}
 
-lint: notenant ## Run go vet + the notenant analyzer over internal/ (SIN-62232 / ADR 0071)
+lint: notenant lint-imports ## Run go vet + the notenant + forbidimport analyzers over internal/ (SIN-62232 / ADR 0071, SIN-62216)
 	$(GO) vet ./...
 	$(GO) vet -vettool=$(NOTENANT_BIN) ./internal/...
 
 notenant: ## Build the notenant analyzer binary into bin/ (SIN-62232 / ADR 0071)
 	$(GO) build -o $(NOTENANT_BIN) ./tools/lint/notenant/cmd/notenant
+
+forbidimport: ## Build the forbidimport analyzer binary into bin/ (SIN-62216)
+	$(GO) build -o $(FORBIDIMPORT_BIN) ./tools/lint/forbidimport/cmd/forbidimport
+
+lint-imports: forbidimport ## Forbid database/sql + pgx + lib/pq outside the postgres adapter (SIN-62216)
+	$(GO) vet -vettool=$(FORBIDIMPORT_BIN) ./internal/...
 
 lint-aicache: ## Run the SIN-62236 aicache analyzer over internal/ai/ as a vet tool
 	$(GO) build -o ./bin/aicache ./cmd/aicache
