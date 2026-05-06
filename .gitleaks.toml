@@ -1,0 +1,98 @@
+# Sindireceita CRM — custom gitleaks ruleset
+# Owner: SecurityEngineer. Issue: SIN-62299.
+#
+# Defense in depth: layer 1 = human review, layer 2 = this gate, layer 3 = GitHub native secret scanning.
+# Fail-closed: future false positives must be fixed by tightening the rule or extending the allowlist below,
+# NEVER by disabling the workflow.
+
+title = "Sindireceita CRM secret-scanner ruleset"
+
+# Extend the gitleaks default rules (AWS, GitHub PAT, generic API keys, etc.).
+[extend]
+useDefault = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meta Cloud API user/system token (EAA-prefixed, >=200 chars).
+# Inbound-channel critical: a leaked token lets an attacker post to a tenant's
+# WhatsApp Business number, read inbound messages, and impersonate the
+# operator on Meta's side.
+# ─────────────────────────────────────────────────────────────────────────────
+[[rules]]
+id = "meta-cloud-user-token"
+description = "Meta Cloud API user/system token (EAA-prefixed, >=200 chars). HIGH sensitivity."
+regex = '''EAA[A-Za-z0-9]{200,}'''
+keywords = ["EAA"]
+tags = ["meta", "graph-api", "high-severity", "inbound-channel"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meta Cloud long-lived graph access token (EAAG-prefixed). Same blast radius
+# as the user token but with extended lifetime, raising rotation cost.
+# ─────────────────────────────────────────────────────────────────────────────
+[[rules]]
+id = "meta-cloud-long-lived-token"
+description = "Meta Cloud long-lived graph access token (EAAG-prefixed). HIGH sensitivity, long-lived."
+regex = '''EAAG[A-Za-z0-9]{200,}'''
+keywords = ["EAAG"]
+tags = ["meta", "graph-api", "high-severity", "long-lived", "inbound-channel"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instagram Graph API token (IGQV-prefixed, >=100 chars). Inbound-channel
+# critical alongside Meta Cloud tokens.
+# ─────────────────────────────────────────────────────────────────────────────
+[[rules]]
+id = "instagram-graph-token"
+description = "Instagram Graph API token (IGQV-prefixed). HIGH sensitivity."
+regex = '''IGQV[A-Za-z0-9_\-]{100,}'''
+keywords = ["IGQV"]
+tags = ["instagram", "graph-api", "high-severity", "inbound-channel"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meta App Secret — 32-hex, used to verify inbound webhook signatures
+# (HMAC-SHA256). Leak nullifies signature verification and lets attackers
+# forge inbound channel messages — direct vector for inbound prompt-injection
+# (LLM Top 10).
+#
+# Context-anchored: requires the variable-name keyword (META_APP_SECRET /
+# app_secret / meta_app_secret / appsecret) adjacent to the value, to avoid
+# firing on every 32-hex string (UUIDs without dashes, MD5 hashes, etc.).
+# ─────────────────────────────────────────────────────────────────────────────
+[[rules]]
+id = "meta-app-secret"
+description = "Meta App Secret (32-hex, webhook HMAC key). HIGH sensitivity. Leak nullifies signature verification."
+regex = '''(?i)(?:meta[_-]?app[_-]?secret|app[_-]?secret|appsecret)["'\s:=]{1,8}["']?\b([a-f0-9]{32})\b'''
+secretGroup = 1
+keywords = ["app_secret", "appsecret", "app-secret"]
+tags = ["meta", "app-secret", "hmac", "high-severity", "webhook-signature"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WhatsApp webhook verify_token — operator-chosen, used during webhook
+# registration on the Meta dashboard. Leak (combined with Cloud API token
+# leak) enables full webhook-callback takeover.
+#
+# Context-anchored: requires the variable name to combine a channel keyword
+# (whatsapp / wa / meta) with verify_token. Bare `verify_token` is too
+# generic (JWT, OAuth) so it is intentionally NOT matched.
+# ─────────────────────────────────────────────────────────────────────────────
+[[rules]]
+id = "whatsapp-verify-token"
+description = "WhatsApp webhook verify_token (operator-chosen). HIGH sensitivity in combination with Cloud API token."
+regex = '''(?i)(?:whatsapp[_-]?verify[_-]?token|wa[_-]?verify[_-]?token|meta[_-]?verify[_-]?token)["'\s:=]{1,8}["']?([A-Za-z0-9_\-]{12,})'''
+secretGroup = 1
+keywords = ["whatsapp_verify_token", "wa_verify_token", "meta_verify_token"]
+tags = ["whatsapp", "verify-token", "webhook-registration", "high-severity"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global allowlist — paths where matches are intentional fixtures, redacted
+# samples, or rule-definition self-references. Tighten the rule before
+# extending this list.
+# ─────────────────────────────────────────────────────────────────────────────
+[allowlist]
+description = "Test fixtures, ADR example payloads, runbook redacted samples, lint analyzer testdata, ruleset self-reference."
+paths = [
+  '''.*_test\.go$''',
+  '''.*/testdata/.*''',
+  '''docs/adr/.*\.md$''',
+  '''docs/runbooks/.*''',
+  '''docs/security/gitleaks\.md$''',
+  '''\.gitleaks\.toml$''',
+]
