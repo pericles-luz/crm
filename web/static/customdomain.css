@@ -1,0 +1,182 @@
+/*
+ * Sindireceita CRM — custom-domain management UI (SIN-62259).
+ *
+ * Mobile-first; design system colors are conservative pending the
+ * shared Sindireceita stylesheet. Status badges follow the spec:
+ *   pending  → yellow
+ *   verified → green
+ *   paused   → gray
+ *   error    → red
+ */
+
+:root {
+  --color-bg: #fafafa;
+  --color-fg: #1a1a1a;
+  --color-muted: #6b7280;
+  --color-primary: #2563eb;
+  --color-primary-fg: #ffffff;
+  --color-danger: #dc2626;
+  --color-danger-fg: #ffffff;
+  --color-border: #e5e7eb;
+  --color-status-pending: #f59e0b;
+  --color-status-verified: #16a34a;
+  --color-status-paused: #6b7280;
+  --color-status-error: #dc2626;
+  --radius: 6px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  margin: 0;
+}
+
+.page-header,
+.page-main,
+.page-footer {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-3);
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-border);
+  background: white;
+  border-radius: var(--radius);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+.btn:hover { background: #f3f4f6; }
+.btn:focus { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.btn-primary { background: var(--color-primary); color: var(--color-primary-fg); border-color: var(--color-primary); }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-danger { background: var(--color-danger); color: var(--color-danger-fg); border-color: var(--color-danger); }
+.btn-danger:hover { background: #b91c1c; }
+.btn-ghost { background: transparent; }
+.btn-sm { padding: 0.25rem 0.5rem; font-size: 0.875rem; }
+.btn-xs { padding: 0.125rem 0.375rem; font-size: 0.75rem; }
+
+.domain-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.domain-table th,
+.domain-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+.domain-table tbody tr:last-child th,
+.domain-table tbody tr:last-child td { border-bottom: 0; }
+
+.status-badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: white;
+}
+.status-yellow { background: var(--color-status-pending); }
+.status-green { background: var(--color-status-verified); }
+.status-gray { background: var(--color-status-paused); }
+.status-red { background: var(--color-status-error); }
+.dnssec-flag { color: var(--color-status-verified); margin-left: var(--space-1); font-size: 0.75rem; }
+
+.actions { display: flex; gap: var(--space-1); flex-wrap: wrap; }
+
+.wizard {
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.wizard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.wizard label { display: block; font-weight: 600; margin-top: var(--space-2); }
+.wizard input[type=text] {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+.form-help { color: var(--color-muted); font-size: 0.875rem; }
+.form-error {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+.dns-instructions {
+  width: 100%;
+  border-collapse: collapse;
+  background: #f9fafb;
+  border-radius: var(--radius);
+  margin: var(--space-3) 0;
+}
+.dns-instructions th, .dns-instructions td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+.dns-instructions code { background: white; padding: 0.125rem 0.375rem; border-radius: 4px; }
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-content {
+  background: white;
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  max-width: 480px;
+  width: 90%;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.muted { color: var(--color-muted); font-size: 0.875rem; }
+.empty-state {
+  background: white;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--color-muted);
+}

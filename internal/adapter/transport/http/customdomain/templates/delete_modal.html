@@ -1,0 +1,42 @@
+{{define "delete_modal"}}
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" tabindex="-1" data-focus-trap>
+  <div class="modal-content">
+    <h3 id="delete-title">Confirmar exclusão</h3>
+    <p>
+      Para confirmar a exclusão do domínio <strong>{{.Host}}</strong>,
+      digite o hostname exato abaixo.
+      <br>O slug ficará reservado por <strong>12 meses</strong>
+      para evitar reapropriação por outro tenant.
+    </p>
+    <form hx-delete="/api/customdomains/{{.DomainID}}"
+          hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
+          hx-target="#domain-list"
+          hx-swap="outerHTML"
+          hx-on:htmx:after-request="document.getElementById('wizard').innerHTML = ''">
+      <label for="confirm-host">Digite <code>{{.Host}}</code> para confirmar</label>
+      <input id="confirm-host"
+             name="confirm"
+             type="text"
+             required
+             autocomplete="off"
+             autofocus
+             pattern="^{{.HostPattern}}$"
+             aria-required="true">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <div class="modal-actions">
+        <button type="button"
+                class="btn btn-ghost"
+                aria-label="Cancelar exclusão"
+                hx-on:click="document.getElementById('wizard').innerHTML = ''">
+          Cancelar
+        </button>
+        <button type="submit"
+                class="btn btn-danger"
+                aria-label="Confirmar exclusão de {{.Host}}">
+          Excluir definitivamente
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}

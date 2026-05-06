@@ -1,0 +1,25 @@
+{{define "base"}}<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — CRM</title>
+  <link rel="stylesheet" href="/static/customdomain.css">
+  <script src="/static/vendor/htmx/2.0.9/htmx.min.js" defer></script>
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+</head>
+<body>
+  <header class="page-header">
+    <h1>{{.Title}}</h1>
+  </header>
+  <main class="page-main">
+    {{template "content" .}}
+  </main>
+  <footer class="page-footer">
+    <p class="muted">
+      Os ativos (logo, mídia) sempre são servidos a partir de <code>static.{{.PrimaryDomain}}</code>,
+      independentemente do custom-domain. Saiba mais na <a href="/help/custom-domain-faq">FAQ</a>.
+    </p>
+  </footer>
+</body>
+</html>{{end}}
