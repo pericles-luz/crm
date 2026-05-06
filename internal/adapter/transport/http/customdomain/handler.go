@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/pericles-luz/crm/internal/customdomain/management"
+	"github.com/pericles-luz/crm/internal/http/middleware/csp"
 )
 
 // Handler is the HTTP boundary for SIN-62259. Construct via New and
@@ -93,6 +94,13 @@ type pageData struct {
 	CSRFToken     string
 	PrimaryDomain string
 	Domains       []domainView
+	// Nonce is the per-request CSP nonce. base.html stamps it on every
+	// <script> tag it owns; csp middleware (SIN-62237) is the source. An
+	// empty value means the request was not routed through the CSP
+	// middleware — the resulting `nonce=""` attribute is harmless because
+	// every script in base.html also has a `src=` that matches the policy
+	// 'self' source.
+	Nonce string
 }
 
 type listPartialData struct {
@@ -163,6 +171,7 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request) {
 		CSRFToken:     csrf,
 		PrimaryDomain: h.primaryDomain,
 		Domains:       views,
+		Nonce:         csp.Nonce(r.Context()),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := renderTemplate(w, "base", data); err != nil {

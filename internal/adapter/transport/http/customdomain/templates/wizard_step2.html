@@ -22,8 +22,7 @@
           <button type="button"
                   class="btn btn-xs btn-ghost"
                   aria-label="Copiar nome do registro TXT"
-                  data-copy-target="dns-name"
-                  onclick="navigator.clipboard.writeText(document.getElementById('dns-name').textContent.trim())">
+                  data-copy-target="dns-name">
             Copiar
           </button>
         </td>
@@ -32,8 +31,7 @@
           <button type="button"
                   class="btn btn-xs btn-ghost"
                   aria-label="Copiar valor do registro TXT"
-                  data-copy-target="dns-value"
-                  onclick="navigator.clipboard.writeText(document.getElementById('dns-value').textContent.trim())">
+                  data-copy-target="dns-value">
             Copiar
           </button>
         </td>
@@ -45,7 +43,7 @@
     <button type="button"
             class="btn btn-ghost"
             aria-label="Fechar instruções"
-            hx-on:click="document.getElementById('wizard').innerHTML = ''">
+            data-close-target="#wizard">
       Fechar
     </button>
     <button type="button"

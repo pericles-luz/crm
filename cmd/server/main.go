@@ -39,6 +39,7 @@ import (
 	"github.com/pericles-luz/crm/internal/customdomain/featureflag"
 	"github.com/pericles-luz/crm/internal/customdomain/ratelimit/sliding"
 	"github.com/pericles-luz/crm/internal/customdomain/tls_ask"
+	"github.com/pericles-luz/crm/internal/http/middleware/csp"
 )
 
 const (
@@ -156,9 +157,17 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 		mux.Handle("/", cdHandler)
 		log.Printf("crm: custom-domain UI mounted on public listener")
 	}
+	// SIN-62237 / F29 — every public response carries a fresh CSP nonce.
+	// Caddy intentionally defers CSP to this Go middleware so the nonce
+	// can be per-request (deploy/caddy/security-headers.caddy §"CSP is
+	// intentionally NOT here"). The middleware wraps the entire public
+	// mux so static assets, HTMX fragments, and full-page renders all
+	// inherit the policy.
+	publicHandler := csp.Middleware(mux)
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           publicHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
