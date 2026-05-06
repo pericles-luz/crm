@@ -12,6 +12,45 @@ The CD pipeline itself is `.github/workflows/cd-stg.yml`; the staging stack is
 `deploy/compose/compose.stg.yml`; the on-host wrapper invoked over SSH is
 `deploy/scripts/stg-deploy.sh`.
 
+## Pre-merge gates
+
+Beyond `ci` / `paperclip-lint` / `aicache-lint` / `webhook-integration` (which
+all install Go via `actions/setup-go` and never exercise the multi-stage
+Dockerfile), one extra gate runs on every PR that touches the staging build
+inputs:
+
+| Gate                    | Workflow                                  | Triggers on path change of                                | What it catches                                                                |
+| ----------------------- | ----------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `docker-smoke` (SIN-62301) | `.github/workflows/docker-smoke.yml`      | `Dockerfile`, `.dockerignore`, `go.mod`, `go.sum`          | Builder-image vs `go.mod` toolchain drift — fails fast at `go mod download` if the pinned base image cannot satisfy the source tree's `go`/`toolchain` directives. |
+| `govulncheck` (SIN-62298) | `.github/workflows/govulncheck.yml`       | every PR                                                  | Reachable stdlib/dep CVEs (call-graph, source-mode).                          |
+
+The gates are **complementary, not duplicates**: `govulncheck` runs against the
+source tree's import graph; `docker-smoke` runs against the build sandbox the
+staging image will actually compile in. Both fail closed.
+
+`docker-smoke` builds the multi-stage `builder` target only — `push: false`,
+`load: false`, GHA-scoped buildx cache. The failure mode that motivated the
+gate (`[builder 4/7] RUN go mod download` against a builder image that does
+not satisfy `toolchain go1.25.9`) surfaces before the runtime stage, so
+building further would add wall-clock without adding signal. Cache-hit runs
+land under ~1 min; cold builds land under the workflow's 8-min timeout.
+
+**If you bump `go.mod` toolchain or `go` directive, also bump:**
+
+- the builder `FROM` digest in `Dockerfile` (currently
+  `golang:1.25.9-alpine@sha256:5caaf1cca…`) — see "Bumping infra image
+  digests" below for the resolve-by-digest flow;
+- `actions/setup-go` `go-version:` in `.github/workflows/ci.yml` (and the
+  other Go-using workflows);
+- the dev compose Go base in `deploy/compose/compose.yml` if it is in scope
+  for your change.
+
+`docker-smoke` will fail closed on the PR if the Dockerfile builder lags,
+which is the postmortem fix-forward from SIN-62297 (the orphan-bridge merge
+that was 8/8 green pre-merge and red 23s post-merge). The gate is also the
+positive-control demonstration: regressing the builder image in a throwaway
+PR turns it red.
+
 ## Architecture in one paragraph
 
 Every push to `main` triggers `ci`. When `ci` finishes green, `cd-stg` wakes,
