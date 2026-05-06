@@ -215,6 +215,13 @@ func (h *Handler) serveEnroll(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, management.ErrPrivateIP):
 			h.renderWizardError(w, r, management.CopyPTBR(management.ReasonPrivateIP, 0, nil))
 			return
+		case errors.Is(err, management.ErrSlugReserved):
+			// SIN-62244 reservation lock: validator rejects the host because
+			// the underlying slug is still reserved within the 12-month
+			// window. Surface the PT-BR copy through the wizard-error
+			// template so the user sees the same UX as other deny cases.
+			h.renderWizardError(w, r, management.CopyPTBR(management.ReasonSlugReserved, 0, res.ReservedUntil))
+			return
 		default:
 			h.serverError(w, r, err)
 			return
