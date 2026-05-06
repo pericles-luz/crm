@@ -15,16 +15,28 @@ import (
 // fakeStore is an in-memory Store for unit tests. It mirrors the
 // partial-unique-index semantics: at most one active reservation per
 // slug.
+//
+// The fake reads "now" from the same Clock the SUT uses (passed by
+// newFakeStore) instead of time.Now(). Production stores rely on the
+// Postgres now() predicate, so the fake must mirror an injected clock
+// to stay deterministic — otherwise tests that pin ExpiresAt to a
+// fixed time become wall-clock time bombs (see SIN-62312).
 type fakeStore struct {
 	rows      map[string]slugreservation.Reservation
 	insertErr error
+	clk       slugreservation.Clock
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{rows: map[string]slugreservation.Reservation{}} }
+func newFakeStore(clk slugreservation.Clock) *fakeStore {
+	if clk == nil {
+		clk = slugreservation.SystemClock{}
+	}
+	return &fakeStore{rows: map[string]slugreservation.Reservation{}, clk: clk}
+}
 
 func (s *fakeStore) Active(_ context.Context, slug string) (slugreservation.Reservation, error) {
 	res, ok := s.rows[slug]
-	if !ok || !res.ExpiresAt.After(time.Now()) {
+	if !ok || !res.ExpiresAt.After(s.clk.Now()) {
 		return slugreservation.Reservation{}, slugreservation.ErrNotReserved
 	}
 	return res, nil
@@ -34,7 +46,7 @@ func (s *fakeStore) Insert(_ context.Context, slug string, by uuid.UUID, release
 	if s.insertErr != nil {
 		return slugreservation.Reservation{}, s.insertErr
 	}
-	if existing, ok := s.rows[slug]; ok && existing.ExpiresAt.After(time.Now()) {
+	if existing, ok := s.rows[slug]; ok && existing.ExpiresAt.After(s.clk.Now()) {
 		return slugreservation.Reservation{}, &slugreservation.ReservedError{Reservation: existing}
 	}
 	r := slugreservation.Reservation{
@@ -59,17 +71,24 @@ func (s *fakeStore) SoftDelete(_ context.Context, slug string, at time.Time) (sl
 	return r, nil
 }
 
+// fakeRedirectStore mirrors fakeStore's clock injection: SUT-aligned
+// "now" comparisons keep TestRedirectHandler_* deterministic regardless
+// of wall-clock time. See SIN-62312.
 type fakeRedirectStore struct {
 	rows map[string]slugreservation.Redirect
+	clk  slugreservation.Clock
 }
 
-func newFakeRedirectStore() *fakeRedirectStore {
-	return &fakeRedirectStore{rows: map[string]slugreservation.Redirect{}}
+func newFakeRedirectStore(clk slugreservation.Clock) *fakeRedirectStore {
+	if clk == nil {
+		clk = slugreservation.SystemClock{}
+	}
+	return &fakeRedirectStore{rows: map[string]slugreservation.Redirect{}, clk: clk}
 }
 
 func (s *fakeRedirectStore) Active(_ context.Context, slug string) (slugreservation.Redirect, error) {
 	r, ok := s.rows[slug]
-	if !ok || !r.ExpiresAt.After(time.Now()) {
+	if !ok || !r.ExpiresAt.After(s.clk.Now()) {
 		return slugreservation.Redirect{}, slugreservation.ErrNotReserved
 	}
 	return r, nil
@@ -113,11 +132,12 @@ func (c fixedClock) Now() time.Time { return c.t }
 
 func newSvc(t *testing.T, now time.Time) (*slugreservation.Service, *fakeStore, *fakeRedirectStore, *fakeAudit, *fakeSlack) {
 	t.Helper()
-	store := newFakeStore()
-	red := newFakeRedirectStore()
+	clk := fixedClock{t: now}
+	store := newFakeStore(clk)
+	red := newFakeRedirectStore(clk)
 	audit := &fakeAudit{}
 	slack := &fakeSlack{}
-	svc, err := slugreservation.NewService(store, red, audit, slack, fixedClock{t: now})
+	svc, err := slugreservation.NewService(store, red, audit, slack, clk)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -126,8 +146,8 @@ func newSvc(t *testing.T, now time.Time) (*slugreservation.Service, *fakeStore, 
 
 func TestNewService_RequiresPorts(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
-	red := newFakeRedirectStore()
+	store := newFakeStore(nil)
+	red := newFakeRedirectStore(nil)
 	audit := &fakeAudit{}
 	slack := &fakeSlack{}
 
@@ -215,10 +235,11 @@ func (errStore) Active(context.Context, string) (slugreservation.Reservation, er
 
 func TestCheckAvailable_StoreError(t *testing.T) {
 	t.Parallel()
-	red := newFakeRedirectStore()
+	clk := fixedClock{t: time.Now()}
+	red := newFakeRedirectStore(clk)
 	audit := &fakeAudit{}
 	slack := &fakeSlack{}
-	svc, err := slugreservation.NewService(errStore{}, red, audit, slack, fixedClock{t: time.Now()})
+	svc, err := slugreservation.NewService(errStore{}, red, audit, slack, clk)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -443,11 +464,12 @@ func (errRedirect) Upsert(context.Context, string, string, time.Time) (slugreser
 
 func TestRedirectStoreErrors(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	clk := fixedClock{t: time.Now()}
+	store := newFakeStore(clk)
 	red := errRedirect{}
 	audit := &fakeAudit{}
 	slack := &fakeSlack{}
-	svc, err := slugreservation.NewService(store, red, audit, slack, fixedClock{t: time.Now()})
+	svc, err := slugreservation.NewService(store, red, audit, slack, clk)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
