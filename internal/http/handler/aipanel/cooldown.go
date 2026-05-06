@@ -25,7 +25,7 @@ import (
 )
 
 // fragmentTpl is a small, audited template. CSS custom property syntax
-// `--cooldown-duration:Xms` is what `static/css/aipanel.css` consumes for
+// `--cooldown-duration:Xms` is what `web/static/css/aipanel.css` consumes for
 // the CSS animation; both the inline style and the visible "N s" caption
 // must reflect the same wall-clock value the middleware returned in
 // Retry-After. We keep the value formatting in Go (not in the template)
