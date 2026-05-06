@@ -363,6 +363,98 @@ func TestSystemClock_NowIsUTC(t *testing.T) {
 	}
 }
 
+func TestValidateHostOnly_HappyPath(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{
+		{IP: ip("203.0.113.10"), VerifiedWithDNSSEC: true},
+	}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	if err := v.ValidateHostOnly(context.Background(), "acme.example"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := a.only()
+	if got.Event != validation.EventValidatedOK {
+		t.Fatalf("audit event = %s, want %s", got.Event, validation.EventValidatedOK)
+	}
+	if got.Detail["phase"] != "host_only" {
+		t.Fatalf("phase detail = %s, want host_only", got.Detail["phase"])
+	}
+}
+
+func TestValidateHostOnly_DoesNotQueryTXT(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["acme.example"] = []dnsresolver.IPAnswer{{IP: ip("203.0.113.10")}}
+	// Arm a TXT error: ValidateHostOnly must NOT consult TXT, so this
+	// should never surface.
+	r.txtErrs["_crm-verify.acme.example"] = errors.New("must not be called")
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	if err := v.ValidateHostOnly(context.Background(), "acme.example"); err != nil {
+		t.Fatalf("ValidateHostOnly must not call TXT lookup; got %v", err)
+	}
+}
+
+func TestValidateHostOnly_BlockedSSRF(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["evil.example"] = []dnsresolver.IPAnswer{{IP: ip("127.0.0.1")}}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	err := v.ValidateHostOnly(context.Background(), "evil.example")
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("err = %v, want ErrPrivateIP", err)
+	}
+	if got := a.only(); got.Event != validation.EventBlockedSSRF || got.Detail["phase"] != "host_only" {
+		t.Fatalf("audit = %+v", got)
+	}
+}
+
+func TestValidateHostOnly_NoAddress(t *testing.T) {
+	r := newFakeResolver()
+	r.ipAnswers["empty.example"] = []dnsresolver.IPAnswer{}
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	err := v.ValidateHostOnly(context.Background(), "empty.example")
+	if !errors.Is(err, validation.ErrNoAddress) {
+		t.Fatalf("err = %v, want ErrNoAddress", err)
+	}
+	if got := a.only(); got.Event != validation.EventNoAddress || got.Detail["phase"] != "host_only" {
+		t.Fatalf("audit = %+v", got)
+	}
+}
+
+func TestValidateHostOnly_ResolverError(t *testing.T) {
+	r := newFakeResolver()
+	r.ipErrs["bork.example"] = dnsresolver.ErrTimeout
+	a := &recordingAuditor{}
+	v, _ := newValidator(r, a)
+
+	err := v.ValidateHostOnly(context.Background(), "bork.example")
+	if !errors.Is(err, dnsresolver.ErrTimeout) {
+		t.Fatalf("err must wrap ErrTimeout; got %v", err)
+	}
+	if got := a.only(); got.Event != validation.EventResolverError || got.Detail["phase"] != "host_only" {
+		t.Fatalf("audit = %+v", got)
+	}
+}
+
+func TestValidateHostOnly_EmptyHost(t *testing.T) {
+	a := &recordingAuditor{}
+	v, _ := newValidator(newFakeResolver(), a)
+
+	err := v.ValidateHostOnly(context.Background(), "  ")
+	if !errors.Is(err, validation.ErrEmptyHost) {
+		t.Fatalf("err = %v, want ErrEmptyHost", err)
+	}
+	if got := a.only(); got.Event != validation.EventEmptyInput || got.Detail["phase"] != "host_only" {
+		t.Fatalf("audit = %+v", got)
+	}
+}
+
 func TestValidate_TXTTokenIsTrimmed(t *testing.T) {
 	// Some DNS providers add trailing whitespace; reject only on real
 	// mismatches.

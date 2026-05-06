@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ import (
 	customdomainhttp "github.com/pericles-luz/crm/internal/adapter/transport/http/customdomain"
 	"github.com/pericles-luz/crm/internal/customdomain/enrollment"
 	"github.com/pericles-luz/crm/internal/customdomain/management"
+	"github.com/pericles-luz/crm/internal/customdomain/validation"
+	"github.com/pericles-luz/crm/internal/iam/dnsresolver"
 	"github.com/pericles-luz/crm/internal/slugreservation"
 )
 
@@ -456,4 +459,278 @@ func (memRedirectStore) Active(context.Context, string) (slugreservation.Redirec
 }
 func (memRedirectStore) Upsert(context.Context, string, string, time.Time) (slugreservation.Redirect, error) {
 	return slugreservation.Redirect{}, nil
+}
+
+// fakeWireResolver is a deterministic in-memory dnsresolver.Resolver for
+// the SIN-62313 wire-up tests. It mirrors the validation package's test
+// fake but lives here so cmd/server can drive the production wire-up
+// (validator → adapters → management.UseCase) without a network round-trip.
+type fakeWireResolver struct {
+	ipAnswers map[string][]dnsresolver.IPAnswer
+	ipErrs    map[string]error
+	txtAns    map[string][]string
+	txtErrs   map[string]error
+}
+
+func newFakeWireResolver() *fakeWireResolver {
+	return &fakeWireResolver{
+		ipAnswers: map[string][]dnsresolver.IPAnswer{},
+		ipErrs:    map[string]error{},
+		txtAns:    map[string][]string{},
+		txtErrs:   map[string]error{},
+	}
+}
+
+func (f *fakeWireResolver) LookupIP(_ context.Context, host string) ([]dnsresolver.IPAnswer, error) {
+	if e, ok := f.ipErrs[host]; ok {
+		return nil, e
+	}
+	return f.ipAnswers[host], nil
+}
+
+func (f *fakeWireResolver) LookupTXT(_ context.Context, host string) ([]string, error) {
+	if e, ok := f.txtErrs[host]; ok {
+		return nil, e
+	}
+	return f.txtAns[host], nil
+}
+
+func newWireValidator(r dnsresolver.Resolver) *validation.Validator {
+	return validation.New(r, nil, validation.SystemClock{})
+}
+
+// TestDefaultCustomDomainResolverFactory_ConstructsResolver verifies the
+// factory respects the env vars; we don't call LookupIP because that
+// would touch the network.
+func TestDefaultCustomDomainResolverFactory_ConstructsResolver(t *testing.T) {
+	t.Parallel()
+	getenv := func(k string) string {
+		switch k {
+		case envCustomDomainDNSSrv:
+			return "unbound:5353"
+		case envCustomDomainDNSSEC:
+			return "true"
+		}
+		return ""
+	}
+	r := defaultCustomDomainResolverFactory(getenv)
+	if r == nil {
+		t.Fatal("resolver factory returned nil")
+	}
+}
+
+// TestDefaultCustomDomainResolverFactory_DefaultsAndDNSSECOff exercises
+// the default-server + DNSSEC-toggle paths so the factory's two
+// explicit branches stay covered.
+func TestDefaultCustomDomainResolverFactory_DefaultsAndDNSSECOff(t *testing.T) {
+	t.Parallel()
+	if r := defaultCustomDomainResolverFactory(func(string) string { return "" }); r == nil {
+		t.Fatal("resolver factory returned nil for empty env")
+	}
+	if r := defaultCustomDomainResolverFactory(func(k string) string {
+		if k == envCustomDomainDNSSEC {
+			return "false"
+		}
+		return ""
+	}); r == nil {
+		t.Fatal("resolver factory returned nil with DNSSEC=false")
+	}
+	if r := defaultCustomDomainResolverFactory(func(k string) string {
+		if k == envCustomDomainDNSSEC {
+			return "not-a-bool"
+		}
+		return ""
+	}); r == nil {
+		t.Fatal("resolver factory returned nil with malformed DNSSEC env (should fall back to default)")
+	}
+}
+
+// TestHostValidatorAdapter_PassesAllowlist arms a single public IP and
+// asserts the adapter returns nil so management.NormalizeHost +
+// hostValidatorAdapter form a complete enrollment pre-flight.
+func TestHostValidatorAdapter_PassesAllowlist(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipAnswers["shop.example.com"] = []dnsresolver.IPAnswer{
+		{IP: netip.MustParseAddr("203.0.113.10"), VerifiedWithDNSSEC: true},
+	}
+	a := hostValidatorAdapter{v: newWireValidator(r)}
+	if err := a.Validate(context.Background(), "shop.example.com"); err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+}
+
+// TestHostValidatorAdapter_BlockedSSRF asserts the validator's
+// ErrPrivateIP is wrapped in management.ErrPrivateIP so
+// classifyValidationError can map it to ReasonPrivateIP at the
+// boundary.
+func TestHostValidatorAdapter_BlockedSSRF(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipAnswers["evil.example.com"] = []dnsresolver.IPAnswer{
+		{IP: netip.MustParseAddr("127.0.0.1")},
+	}
+	a := hostValidatorAdapter{v: newWireValidator(r)}
+	err := a.Validate(context.Background(), "evil.example.com")
+	if !errors.Is(err, management.ErrPrivateIP) {
+		t.Fatalf("err = %v, want management.ErrPrivateIP", err)
+	}
+	if !errors.Is(err, validation.ErrPrivateIP) {
+		t.Fatalf("err must still chain to validation.ErrPrivateIP for audit: %v", err)
+	}
+}
+
+// TestHostValidatorAdapter_EmptyHostMapsToInvalidHost asserts the
+// validator's ErrEmptyHost is wrapped in management.ErrInvalidHost so
+// the boundary returns ReasonInvalidHost.
+func TestHostValidatorAdapter_EmptyHostMapsToInvalidHost(t *testing.T) {
+	t.Parallel()
+	a := hostValidatorAdapter{v: newWireValidator(newFakeWireResolver())}
+	err := a.Validate(context.Background(), "")
+	if !errors.Is(err, management.ErrInvalidHost) {
+		t.Fatalf("err = %v, want management.ErrInvalidHost", err)
+	}
+}
+
+// TestHostValidatorAdapter_OtherErrorPropagates asserts non-sentinel
+// resolver errors propagate without wrap so the boundary maps them to
+// ReasonDNSResolutionFailed.
+func TestHostValidatorAdapter_OtherErrorPropagates(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipErrs["bork.example.com"] = dnsresolver.ErrTimeout
+	a := hostValidatorAdapter{v: newWireValidator(r)}
+	err := a.Validate(context.Background(), "bork.example.com")
+	if !errors.Is(err, dnsresolver.ErrTimeout) {
+		t.Fatalf("err must wrap dnsresolver.ErrTimeout, got %v", err)
+	}
+}
+
+// TestDNSCheckerAdapter_HappyPathSetsDNSSEC is the SIN-62313 acceptance
+// criterion at the adapter level: when validation succeeds the DNSSEC
+// flag flows through to the management.DNSCheckResult.
+func TestDNSCheckerAdapter_HappyPathSetsDNSSEC(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipAnswers["shop.example.com"] = []dnsresolver.IPAnswer{
+		{IP: netip.MustParseAddr("203.0.113.10"), VerifiedWithDNSSEC: true},
+	}
+	r.txtAns["_crm-verify.shop.example.com"] = []string{"crm-verify=tok"}
+	a := dnsCheckerAdapter{v: newWireValidator(r)}
+	res, err := a.Check(context.Background(), "shop.example.com", "crm-verify=tok")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if !res.WithDNSSEC {
+		t.Fatalf("expected WithDNSSEC=true when resolver signals AD bit")
+	}
+}
+
+// TestDNSCheckerAdapter_TokenMismatchWrapsManagementSentinel asserts
+// validation.ErrTokenMismatch is rewrapped so the boundary's
+// classifyValidationError returns ReasonTokenMismatch (not the generic
+// ReasonDNSResolutionFailed).
+func TestDNSCheckerAdapter_TokenMismatchWrapsManagementSentinel(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipAnswers["shop.example.com"] = []dnsresolver.IPAnswer{
+		{IP: netip.MustParseAddr("203.0.113.10")},
+	}
+	r.txtAns["_crm-verify.shop.example.com"] = []string{"crm-verify=other"}
+	a := dnsCheckerAdapter{v: newWireValidator(r)}
+	_, err := a.Check(context.Background(), "shop.example.com", "crm-verify=tok")
+	if !errors.Is(err, management.ErrTokenMismatch) {
+		t.Fatalf("err = %v, want management.ErrTokenMismatch", err)
+	}
+	if !errors.Is(err, validation.ErrTokenMismatch) {
+		t.Fatalf("err must still chain to validation.ErrTokenMismatch: %v", err)
+	}
+}
+
+// TestDNSCheckerAdapter_PrivateIPWrapsManagementSentinel mirrors the
+// TokenMismatch test for the SSRF branch.
+func TestDNSCheckerAdapter_PrivateIPWrapsManagementSentinel(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipAnswers["evil.example.com"] = []dnsresolver.IPAnswer{
+		{IP: netip.MustParseAddr("127.0.0.1")},
+	}
+	a := dnsCheckerAdapter{v: newWireValidator(r)}
+	_, err := a.Check(context.Background(), "evil.example.com", "crm-verify=tok")
+	if !errors.Is(err, management.ErrPrivateIP) {
+		t.Fatalf("err = %v, want management.ErrPrivateIP", err)
+	}
+}
+
+// TestDNSCheckerAdapter_OtherErrorPropagates ensures resolver-level
+// failures (timeouts, no record) flow through unwrapped so they map to
+// ReasonDNSResolutionFailed at the boundary.
+func TestDNSCheckerAdapter_OtherErrorPropagates(t *testing.T) {
+	t.Parallel()
+	r := newFakeWireResolver()
+	r.ipErrs["bork.example.com"] = dnsresolver.ErrTimeout
+	a := dnsCheckerAdapter{v: newWireValidator(r)}
+	_, err := a.Check(context.Background(), "bork.example.com", "crm-verify=tok")
+	if !errors.Is(err, dnsresolver.ErrTimeout) {
+		t.Fatalf("err must wrap dnsresolver.ErrTimeout, got %v", err)
+	}
+}
+
+// TestValidationAuditRecord_Smoke ensures the slog adapter does not panic
+// on either the no-Detail or has-Detail path. We do not assert log output
+// because the production logger is global; coverage of the branch is
+// enough.
+func TestValidationAuditRecord_Smoke(t *testing.T) {
+	t.Parallel()
+	a := validationAudit{logger: slog.Default()}
+	a.Record(context.Background(), validation.AuditEvent{Event: "x", Host: "shop.example.com", At: time.Now()})
+	a.Record(context.Background(), validation.AuditEvent{
+		Event:  "y",
+		Host:   "shop.example.com",
+		At:     time.Now(),
+		Detail: map[string]string{"phase": "host_only"},
+	})
+}
+
+// TestBuildCustomDomainHandler_WithFakeResolver_HappyPath wires the full
+// stack with a stub pool + fake resolver and exercises a GET to confirm
+// the resolver factory is invoked exactly when the feature flag enables
+// the handler. (Verify-path end-to-end coverage lives in handler_test.go
+// where the management.UseCase fake is more ergonomic.)
+func TestBuildCustomDomainHandler_WithFakeResolver_HappyPath(t *testing.T) {
+	t.Parallel()
+	getenv := func(k string) string {
+		switch k {
+		case envCustomDomainUI:
+			return "1"
+		case "DATABASE_URL":
+			return "postgres://example/db"
+		case envCustomDomainCSRF:
+			return strings.Repeat("a", 32)
+		}
+		return ""
+	}
+	dial := func(_ context.Context, _ string) (customDomainPool, error) {
+		return &fakeCustomDomainPool{}, nil
+	}
+	resolverCalled := false
+	resolverFactory := func(getenv func(string) string) dnsresolver.Resolver {
+		resolverCalled = true
+		return newFakeWireResolver()
+	}
+	h, cleanup := buildCustomDomainHandlerWithDeps(context.Background(), getenv, dial, resolverFactory)
+	if h == nil {
+		t.Fatal("expected handler when deps satisfied")
+	}
+	defer cleanup()
+	if !resolverCalled {
+		t.Fatal("resolver factory must be invoked once when handler is wired")
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/tenant/custom-domains", nil)
+	req.Header.Set(envCustomDomainTenantHd, uuid.New().String())
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
 }

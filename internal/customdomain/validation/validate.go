@@ -136,6 +136,48 @@ func (v *Validator) Validate(ctx context.Context, host, expectedToken string) (R
 	return res, nil
 }
 
+// ValidateHostOnly runs the IP-allowlist half of Validate without the TXT
+// proof. It is the pre-flight the Enroll path uses: at enrollment time the
+// tenant has not published the verification TXT yet, but we still want to
+// reject hosts that resolve to a private/loopback range so the user is not
+// asked to publish a token they will never be able to verify.
+//
+// Contract:
+//
+//   - Empty host → ErrEmptyHost + EventEmptyInput.
+//   - Resolver error → wrapped error + EventResolverError.
+//   - No A/AAAA → ErrNoAddress + EventNoAddress.
+//   - Any answer in the blocked CIDRs → ErrPrivateIP + EventBlockedSSRF.
+//   - Otherwise → nil error. The audit log records EventValidatedOK with
+//     a `phase=host_only` detail so reviewers can tell pre-flight events
+//     apart from end-to-end ones.
+func (v *Validator) ValidateHostOnly(ctx context.Context, host string) error {
+	host = strings.TrimSpace(strings.ToLower(host))
+	now := v.clock.Now()
+
+	if host == "" {
+		v.auditor.Record(ctx, AuditEvent{Event: EventEmptyInput, Host: host, At: now, Detail: map[string]string{"reason": "host", "phase": "host_only"}})
+		return ErrEmptyHost
+	}
+	answers, err := v.resolver.LookupIP(ctx, host)
+	if err != nil {
+		v.auditor.Record(ctx, AuditEvent{Event: EventResolverError, Host: host, At: now, Detail: map[string]string{"phase": "host_only", "err": err.Error()}})
+		return fmt.Errorf("validation: lookup IP for %q: %w", host, err)
+	}
+	if len(answers) == 0 {
+		v.auditor.Record(ctx, AuditEvent{Event: EventNoAddress, Host: host, At: now, Detail: map[string]string{"phase": "host_only"}})
+		return ErrNoAddress
+	}
+	for _, a := range answers {
+		if isBlocked(a.IP) {
+			v.auditor.Record(ctx, AuditEvent{Event: EventBlockedSSRF, Host: host, At: now, Detail: map[string]string{"phase": "host_only", "answers": fmt.Sprintf("%d", len(answers))}})
+			return ErrPrivateIP
+		}
+	}
+	v.auditor.Record(ctx, AuditEvent{Event: EventValidatedOK, Host: host, At: now, Detail: map[string]string{"phase": "host_only"}})
+	return nil
+}
+
 // containsToken does a constant-style equality check in a loop. The token
 // is a server-issued opaque string — there is no timing-side-channel risk
 // because the attacker controls the TXT side, not our side, and they get
