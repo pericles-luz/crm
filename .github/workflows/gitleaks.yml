@@ -36,7 +36,10 @@ jobs:
       GITLEAKS_VERSION: "8.21.2"
       GITLEAKS_SHA256: "5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned per SIN-62303: a compromised tag publish on a third-party
+      # GitHub-hosted action would otherwise smuggle malicious workflow code
+      # into CI. Bump SHA + trailing version comment together when upgrading.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           # Full history so --log-opts="--all" can scan every commit, including
           # orphan-history branches merged via --allow-unrelated-histories.
@@ -67,7 +70,7 @@ jobs:
 
       - name: upload SARIF report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: gitleaks-report
           path: gitleaks-report.sarif
