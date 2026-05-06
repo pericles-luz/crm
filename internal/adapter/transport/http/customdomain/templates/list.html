@@ -1,0 +1,112 @@
+{{define "content"}}
+<section aria-labelledby="domains-section">
+  <div class="section-header">
+    <h2 id="domains-section">Domínios personalizados</h2>
+    <button type="button"
+            class="btn btn-primary"
+            aria-label="Adicionar novo domínio personalizado"
+            hx-get="/tenant/custom-domains/new"
+            hx-target="#wizard"
+            hx-swap="innerHTML">
+      Adicionar domínio
+    </button>
+  </div>
+
+  <div id="wizard" aria-live="polite"></div>
+
+  {{template "list_partial" .}}
+</section>
+{{end}}
+
+{{define "list_partial"}}
+<div id="domain-list">
+{{if .Domains}}
+<table class="domain-table" summary="Lista de domínios personalizados deste tenant">
+  <thead>
+    <tr>
+      <th scope="col">Host</th>
+      <th scope="col">Status</th>
+      <th scope="col">Verificado em</th>
+      <th scope="col">Criado em</th>
+      <th scope="col">Ações</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Domains}}
+    <tr id="domain-row-{{.ID}}"
+        {{if eq .StatusName "pending"}}hx-get="/tenant/custom-domains/{{.ID}}/status"
+        hx-trigger="every 30s"
+        hx-target="this"
+        hx-swap="outerHTML"{{end}}>
+      <td><code>{{.Host}}</code></td>
+      <td>
+        <span class="status-badge status-{{.BadgeColor}}"
+              title="{{.StatusTooltip}}"
+              aria-label="Status: {{.StatusLabel}}">
+          {{.StatusLabel}}
+        </span>
+        {{if .VerifiedWithDNSSEC}}<span class="dnssec-flag" title="Verificado com DNSSEC">🔒 DNSSEC</span>{{end}}
+      </td>
+      <td>{{if .VerifiedAtFmt}}{{.VerifiedAtFmt}}{{else}}—{{end}}</td>
+      <td>{{.CreatedAtFmt}}</td>
+      <td class="actions">
+        {{if eq .StatusName "pending"}}
+          <button type="button"
+                  class="btn btn-sm"
+                  aria-label="Mostrar instruções de DNS para {{.Host}}"
+                  hx-get="/tenant/custom-domains/{{.ID}}/instructions"
+                  hx-target="#wizard"
+                  hx-swap="innerHTML">
+            Instruções DNS
+          </button>
+          <button type="button"
+                  class="btn btn-sm btn-primary"
+                  aria-label="Verificar agora o domínio {{.Host}}"
+                  hx-post="/api/customdomains/{{.ID}}/verify"
+                  hx-headers='{"X-CSRF-Token": "{{$.CSRFToken}}"}'
+                  hx-target="#domain-row-{{.ID}}"
+                  hx-swap="outerHTML">
+            Verificar agora
+          </button>
+        {{end}}
+        {{if eq .StatusName "verified"}}
+          <button type="button"
+                  class="btn btn-sm"
+                  aria-label="Pausar TLS para {{.Host}}"
+                  hx-patch="/api/customdomains/{{.ID}}?paused=true"
+                  hx-headers='{"X-CSRF-Token": "{{$.CSRFToken}}"}'
+                  hx-target="#domain-row-{{.ID}}"
+                  hx-swap="outerHTML"
+                  hx-confirm="Tem certeza que deseja pausar TLS para {{.Host}}? Isto interrompe novos certificados.">
+            Pausar TLS
+          </button>
+        {{end}}
+        {{if eq .StatusName "paused"}}
+          <button type="button"
+                  class="btn btn-sm"
+                  aria-label="Retomar TLS para {{.Host}}"
+                  hx-patch="/api/customdomains/{{.ID}}?paused=false"
+                  hx-headers='{"X-CSRF-Token": "{{$.CSRFToken}}"}'
+                  hx-target="#domain-row-{{.ID}}"
+                  hx-swap="outerHTML">
+            Retomar TLS
+          </button>
+        {{end}}
+        <button type="button"
+                class="btn btn-sm btn-danger"
+                aria-label="Excluir o domínio {{.Host}}"
+                hx-get="/tenant/custom-domains/{{.ID}}/delete"
+                hx-target="#wizard"
+                hx-swap="innerHTML">
+          Excluir
+        </button>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty-state">Nenhum domínio cadastrado ainda.</p>
+{{end}}
+</div>
+{{end}}

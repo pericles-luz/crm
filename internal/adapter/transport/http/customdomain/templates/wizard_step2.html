@@ -1,0 +1,62 @@
+{{define "wizard_step2"}}
+<section class="wizard wizard-step2" aria-labelledby="step2-title">
+  <h3 id="step2-title">Passo 2 — Configure o registro TXT</h3>
+  <p>
+    Acesse o painel DNS do seu provedor e adicione um registro TXT com os
+    valores abaixo. A propagação leva normalmente entre 5 minutos e 48 horas.
+  </p>
+
+  <table class="dns-instructions" summary="Registro TXT necessário para verificar a propriedade do domínio">
+    <thead>
+      <tr>
+        <th scope="col">Tipo</th>
+        <th scope="col">Nome</th>
+        <th scope="col">Valor</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>TXT</td>
+        <td>
+          <code id="dns-name">{{.TXTRecord}}</code>
+          <button type="button"
+                  class="btn btn-xs btn-ghost"
+                  aria-label="Copiar nome do registro TXT"
+                  data-copy-target="dns-name"
+                  onclick="navigator.clipboard.writeText(document.getElementById('dns-name').textContent.trim())">
+            Copiar
+          </button>
+        </td>
+        <td>
+          <code id="dns-value">{{.TXTValue}}</code>
+          <button type="button"
+                  class="btn btn-xs btn-ghost"
+                  aria-label="Copiar valor do registro TXT"
+                  data-copy-target="dns-value"
+                  onclick="navigator.clipboard.writeText(document.getElementById('dns-value').textContent.trim())">
+            Copiar
+          </button>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="wizard-actions">
+    <button type="button"
+            class="btn btn-ghost"
+            aria-label="Fechar instruções"
+            hx-on:click="document.getElementById('wizard').innerHTML = ''">
+      Fechar
+    </button>
+    <button type="button"
+            class="btn btn-primary"
+            aria-label="Verificar propagação DNS agora"
+            hx-post="/api/customdomains/{{.DomainID}}/verify"
+            hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
+            hx-target="#domain-row-{{.DomainID}}"
+            hx-swap="outerHTML">
+      Verificar agora
+    </button>
+  </div>
+</section>
+{{end}}

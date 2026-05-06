@@ -1,0 +1,11 @@
+{{define "error_partial"}}
+<div class="form-error" role="alert" aria-live="assertive">
+  <p>{{.Message}}</p>
+  <button type="button"
+          class="btn btn-ghost"
+          aria-label="Fechar mensagem de erro"
+          hx-on:click="document.getElementById('wizard').innerHTML = ''">
+    Fechar
+  </button>
+</div>
+{{end}}

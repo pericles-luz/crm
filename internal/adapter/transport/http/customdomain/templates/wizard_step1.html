@@ -1,0 +1,38 @@
+{{define "wizard_step1"}}
+<form class="wizard"
+      hx-post="/tenant/custom-domains"
+      hx-target="#wizard"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'
+      novalidate>
+  <h3>Passo 1 — Informe o domínio</h3>
+  {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
+  <label for="host">
+    Hostname (FQDN, ex.: <code>shop.empresa.com</code>)
+  </label>
+  <input id="host"
+         name="host"
+         type="text"
+         required
+         minlength="3"
+         maxlength="253"
+         autocomplete="off"
+         pattern="^(?!-)([a-z0-9-]{1,63}\.)+[a-z]{2,63}$"
+         autocapitalize="off"
+         autofocus
+         aria-describedby="host-help">
+  <p id="host-help" class="form-help">
+    Use um FQDN público válido (até 253 caracteres). IPs literais e <code>localhost</code> não são aceitos.
+  </p>
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <div class="wizard-actions">
+    <button type="button"
+            class="btn btn-ghost"
+            aria-label="Cancelar adição de domínio"
+            hx-on:click="document.getElementById('wizard').innerHTML = ''">
+      Cancelar
+    </button>
+    <button type="submit" class="btn btn-primary">Continuar</button>
+  </div>
+</form>
+{{end}}
