@@ -28,6 +28,16 @@ func TestAnalyzer_AllowsAdapterPackage(t *testing.T) {
 		"github.com/pericles-luz/crm/internal/adapter/db/postgres/inadapter")
 }
 
+// TestAnalyzer_AllowsStoreAdapterPackage covers the second allowlisted
+// postgres adapter sub-package. internal/adapter/store/postgres holds
+// per-port store implementations that consume the pool seam from
+// db/postgres and expose clean domain ports upward — forbidden imports
+// inside it must not fire.
+func TestAnalyzer_AllowsStoreAdapterPackage(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), forbidimport.Analyzer,
+		"github.com/pericles-luz/crm/internal/adapter/store/postgres/inadapter")
+}
+
 // TestAnalyzer_AllowsExternalAdapterTestPackage proves the `_test` suffix
 // stripping works: Go reports external test files (`package foo_test`) as
 // import path `<foo>_test`, and the adapter's external test package must

@@ -9,8 +9,13 @@ calls and the boundary erodes.
 
 > **Only the postgres adapter may import a SQL driver.**
 
+The postgres adapter is split across two sibling sub-packages —
+`internal/adapter/db/postgres/...` (pool, tenant scoping, testpg
+harness) and `internal/adapter/store/postgres/...` (per-port store
+implementations). Together they form the seam.
+
 Concretely, the following packages MUST NOT appear in any `import`
-declaration outside `internal/adapter/db/postgres/...`:
+declaration outside those two adapter sub-trees:
 
 | Forbidden import          | Match  | Why                                                |
 | ------------------------- | ------ | -------------------------------------------------- |
@@ -25,19 +30,28 @@ depend on **ports** (interfaces) — never on the driver.
 
 ## Allowed paths
 
-The analyzer's allowlist is intentionally narrow:
+The analyzer's allowlist is intentionally narrow — only the two
+postgres adapter sub-packages and anything rooted under them:
 
 - `github.com/pericles-luz/crm/internal/adapter/db/postgres` and any
-  sub-package (`testpg`, future `migrations` helpers, etc.).
+  sub-package (`testpg`, future `migrations` helpers, etc.). This is the
+  pool / tenant / connection seam.
+- `github.com/pericles-luz/crm/internal/adapter/store/postgres` and any
+  sub-package. Per-port store implementations live here
+  (`idempotency_store`, `raw_event_store`, `tenant_association_store`,
+  `webhook_token_store`, …). Each receives a `PgxConn` from the
+  `db/postgres` pool and implements a domain-defined port (e.g.
+  `webhook.IdempotencyStore`) without leaking pgx types upward.
 
-The path is the seam where the hexagonal architecture _wants_ a SQL
+Both paths are the seam where the hexagonal architecture _wants_ a SQL
 driver to live. Everything else — `internal/iam`, `internal/inbox`,
-`internal/ai`, `internal/webhook`, … — is on the wrong side of the
-boundary and is rejected.
+`internal/ai`, `internal/webhook`, `internal/worker`, … — is on the
+wrong side of the boundary and is rejected.
 
-External test files for the postgres adapter (`package postgres_test`)
-share the allowlist — Go reports their import path as
-`<adapter>_test`, and the analyzer strips that suffix before checking.
+External test files for either adapter sub-package
+(`package postgres_test`) share the allowlist — Go reports their import
+path as `<adapter>_test`, and the analyzer strips that suffix before
+checking.
 
 ## Override marker
 
@@ -80,9 +94,10 @@ sub-package match), then add a fixture line under
 
 Be conservative — every entry weakens the boundary. If a new
 `internal/adapter/...` adapter genuinely owns a different DB driver
-(e.g. SQLite for offline tooling), add its import-path prefix to
-`allowedPkgPrefixes` and document the rationale here under "Allowed
-paths".
+(e.g. SQLite for offline tooling), or a new sibling postgres
+sub-package emerges with the same hexagonal role as `db/postgres` and
+`store/postgres`, add its import-path prefix to `allowedPkgPrefixes`
+and document the rationale here under "Allowed paths".
 
 ## Why the rule
 

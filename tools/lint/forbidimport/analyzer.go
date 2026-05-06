@@ -1,8 +1,11 @@
 // Package forbidimport implements a go/analysis pass that fails CI when any
-// package outside internal/adapter/db/postgres imports a SQL driver. The
+// package outside the postgres adapter packages imports a SQL driver. The
 // hexagonal boundary requires every database call to flow through the
 // postgres adapter — domain code, use-cases, and HTTP handlers must depend
-// on ports, never directly on database/sql or pgx. See SIN-62216 and
+// on ports, never directly on database/sql or pgx. The adapter is split
+// across two sibling sub-packages (internal/adapter/db/postgres for the
+// pool/tenant/connection seam and internal/adapter/store/postgres for
+// store implementations); both are allowlisted. See SIN-62216 and
 // docs/architecture/import-rules.md.
 package forbidimport
 
@@ -21,7 +24,7 @@ import (
 //	go vet -vettool=$(which forbidimport) ./internal/...
 var Analyzer = &analysis.Analyzer{
 	Name: "forbidimport",
-	Doc:  "reports imports of database/sql or pgx/lib/pq outside internal/adapter/db/postgres; route DB access through the postgres adapter (SIN-62216)",
+	Doc:  "reports imports of database/sql or pgx/lib/pq outside the postgres adapter packages (internal/adapter/db/postgres and internal/adapter/store/postgres); route DB access through the postgres adapter (SIN-62216)",
 	Run:  run,
 }
 
@@ -43,11 +46,17 @@ var forbiddenPrefixes = []string{
 }
 
 // allowedPkgPrefixes are package-path prefixes whose Go files may import
-// the forbidden packages directly. The postgres adapter (and its testpg
-// harness sub-package) is the seam between the domain and the SQL driver
-// — exactly the place hexagonal architecture allows database/sql.
+// the forbidden packages directly. The postgres adapter is the seam
+// between the domain and the SQL driver — exactly the place hexagonal
+// architecture allows database/sql. The adapter is organized in two
+// sibling sub-packages, both allowlisted:
+//   - internal/adapter/db/postgres: pool, tenant scoping, testpg harness.
+//   - internal/adapter/store/postgres: per-port store implementations
+//     (idempotency, raw events, tenant association, webhook tokens, …)
+//     that consume the pool above and expose clean domain ports upward.
 var allowedPkgPrefixes = []string{
 	"github.com/pericles-luz/crm/internal/adapter/db/postgres",
+	"github.com/pericles-luz/crm/internal/adapter/store/postgres",
 }
 
 // overrideMarker is the magic comment that silences a single forbidden
@@ -72,7 +81,7 @@ func run(pass *analysis.Pass) (any, error) {
 				continue
 			}
 			pass.Reportf(imp.Pos(),
-				"forbidden import %q outside internal/adapter/db/postgres; route DB access through the postgres adapter (SIN-62216)",
+				"forbidden import %q outside the postgres adapter packages (internal/adapter/db/postgres, internal/adapter/store/postgres); route DB access through the postgres adapter (SIN-62216)",
 				path)
 		}
 	}

@@ -4,5 +4,5 @@ package bareoverride
 
 import (
 	// forbidimport:ok
-	_ "database/sql" // want `forbidden import "database/sql" outside internal/adapter/db/postgres`
+	_ "database/sql" // want `forbidden import "database/sql" outside the postgres adapter packages`
 )
