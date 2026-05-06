@@ -2,11 +2,19 @@ package main
 
 // SIN-62259 wiring — public-side custom-domain management UI.
 //
-// The handler is wired only when CUSTOM_DOMAIN_UI_ENABLED=1 AND the
-// process has both DATABASE_URL and REDIS_URL configured. When any of
+// The handler is wired only when CUSTOM_DOMAIN_UI_ENABLED=1 AND
+// DATABASE_URL + CUSTOM_DOMAIN_CSRF_SECRET are configured. When any of
 // those are unset the handler is omitted; the existing /health route
 // remains the only public surface (preserving cmd/server tests that
 // run without external deps).
+//
+// The enrollment-quota / circuit-breaker gate is wired to in-memory
+// no-op placeholders (zeroCount / passWindowCounter / zeroBreaker) so
+// the UI is bootable without Redis. This is INTENTIONAL for the v1
+// flag-flip — it disables the quota check, so production deploys MUST
+// swap to a Redis-backed adapter via the follow-up child issue before
+// flipping CUSTOM_DOMAIN_UI_ENABLED=1 in production. A startup WARN is
+// emitted from buildEnrollmentGate so the gap is visible in logs.
 //
 // Tenant identity is sourced from a request header (`X-Tenant-ID`)
 // while session/cookie auth is owned by a separate ticket. The header
@@ -175,15 +183,24 @@ func wrapWithDevTenantHeader(next http.Handler, _ *os.File) http.Handler {
 	})
 }
 
-// buildEnrollmentGate wires *enrollment.UseCase against the production
-// adapters. The breaker uses the existing in-memory implementation as a
-// placeholder — the Redis-backed breaker lives behind the same port and
-// will be swapped in when its adapter PR lands.
+// buildEnrollmentGate wires *enrollment.UseCase against in-memory no-op
+// placeholders (zeroCount / passWindowCounter / zeroBreaker) so the UI
+// is bootable without Redis. This effectively DISABLES the per-tenant
+// enrollment quota and the LE circuit breaker on the public listener
+// — the production swap is tracked in the follow-up child issue
+// referenced from the package doc.
+//
+// A startup WARN is emitted on every wire-up so the gap is visible in
+// production logs; do not flip CUSTOM_DOMAIN_UI_ENABLED=1 in a
+// customer-facing environment until the Redis-backed adapter has
+// replaced these placeholders.
 func buildEnrollmentGate(_ pgstore.PgxConn) (management.EnrollmentGate, func()) {
-	// Redis client is reused from the internal listener; for the public
-	// path we use lightweight in-memory implementations so the UI is
-	// bootable without Redis. CTO can swap to the production adapters
-	// once they are public-listener safe.
+	slog.Default().Warn(
+		"customdomain: enrollment quota and circuit breaker are running in dev/no-op mode (in-memory placeholders); swap to Redis-backed adapters before flipping CUSTOM_DOMAIN_UI_ENABLED=1 in production",
+		slog.String("component", "customdomain.management"),
+		slog.String("gate", "enrollment"),
+		slog.String("breaker", "letsencrypt"),
+	)
 	gate := enrollment.New(
 		zeroCount{},
 		passWindowCounter{},
