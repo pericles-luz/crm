@@ -1,0 +1,71 @@
+# Webhook integration tests — SIN-62277.
+#
+# Runs the integration suite against a real Postgres 16 service container,
+# exercising migrations 0075a..0075d (up/down/up cycle, partition rotation,
+# token-rotation overlap, cross-tenant idempotency segmentation, body↔
+# tenant misroute detection — see internal/webhook/integration/).
+#
+# The unit suite already runs in `ci.yml` (SIN-62232); this job is gated
+# by the `integration` build tag so it never gets pulled into the fast
+# default `go test ./...` path.
+
+name: webhook-integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  webhook-integration:
+    name: webhook integration (Postgres real)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: crm
+          POSTGRES_PASSWORD: crm
+          POSTGRES_DB: crmtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crm -d crmtest"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # Harness in internal/webhook/integration/harness_test.go reads
+      # TEST_POSTGRES_DSN first; testcontainers is the local-dev fallback.
+      TEST_POSTGRES_DSN: "postgres://crm:crm@127.0.0.1:5432/crmtest?sslmode=disable"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go vet (integration build tag)
+        run: go vet -tags integration ./internal/webhook/integration/...
+
+      - name: integration suite + combined coverage gate (>=85%)
+        run: make test-integration-cover
+
+      - name: upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook-integration-coverage
+          path: |
+            coverage.unit.out
+            coverage.itest.out
+            coverage.combined.out
+          if-no-files-found: ignore
