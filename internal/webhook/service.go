@@ -403,6 +403,6 @@ func (noopLogger) LogResult(context.Context, LogRecord) {}
 
 type noopMetrics struct{}
 
-func (noopMetrics) IncReceived(string, Outcome, TenantID, bool)    {}
-func (noopMetrics) ObserveAck(string, time.Duration)               {}
-func (noopMetrics) IncIdempotencyConflict(string, TenantID)        {}
+func (noopMetrics) IncReceived(string, Outcome, TenantID, bool) {}
+func (noopMetrics) ObserveAck(string, time.Duration)            {}
+func (noopMetrics) IncIdempotencyConflict(string, TenantID)     {}

@@ -161,13 +161,15 @@ func (a *Adapter) ParseEvent(body []byte) (webhook.Event, error) {
 //     where an attacker submits a Meta-shape body with the phone_number_id
 //     surgically removed and gets a free pass. Fail-closed by design:
 //
-//     • body with phone_number_id present  → (id, true).
-//     • body parseable but field missing   → ("", true) — cross-check
-//       fails with outcome `tenant_body_mismatch`.
-//     • body completely malformed JSON     → ("", true) — same; the
-//       request is dropped here rather than reaching ParseEvent. Either
-//       drop is silent 200 anti-enumeration; the operator distinguishes
-//       them via metric outcome labels.
+//   - body with phone_number_id present  → (id, true).
+//
+//   - body parseable but field missing   → ("", true) — cross-check
+//     fails with outcome `tenant_body_mismatch`.
+//
+//   - body completely malformed JSON     → ("", true) — same; the
+//     request is dropped here rather than reaching ParseEvent. Either
+//     drop is silent 200 anti-enumeration; the operator distinguishes
+//     them via metric outcome labels.
 //
 //   - When (and only when) this adapter is extended to support Meta
 //     event types that do NOT carry a phone_number_id (e.g. account-

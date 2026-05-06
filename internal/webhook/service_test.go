@@ -27,8 +27,8 @@ type fakeAdapter struct {
 	preTenantOk bool
 }
 
-func (f *fakeAdapter) Name() string                       { return f.name }
-func (f *fakeAdapter) SecretScope() webhook.SecretScope   { return f.scope }
+func (f *fakeAdapter) Name() string                     { return f.name }
+func (f *fakeAdapter) SecretScope() webhook.SecretScope { return f.scope }
 func (f *fakeAdapter) VerifyApp(c context.Context, b []byte, h map[string][]string) error {
 	if f.verifyApp != nil {
 		return f.verifyApp(c, b, h)
@@ -66,10 +66,10 @@ func (f *fakeAdapter) BodyTenantAssociation(b []byte) (string, bool) {
 
 // fakeTokenStore returns the configured tenantID for any (channel, hash).
 type fakeTokenStore struct {
-	tenant   webhook.TenantID
-	err      error
-	markErr  error
-	calls    int
+	tenant    webhook.TenantID
+	err       error
+	markErr   error
+	calls     int
 	markCalls int
 }
 
@@ -107,12 +107,12 @@ func (f *fakeIdem) CheckAndStore(_ context.Context, _ webhook.TenantID, _ string
 
 // fakeRawEventStore counts inserts/marks; returns a deterministic id.
 type fakeRawEventStore struct {
-	mu       sync.Mutex
-	rows     []webhook.RawEventRow
-	id       [16]byte
+	mu        sync.Mutex
+	rows      []webhook.RawEventRow
+	id        [16]byte
 	insertErr error
-	markErr  error
-	marked   int
+	markErr   error
+	marked    int
 }
 
 func (s *fakeRawEventStore) Insert(_ context.Context, row webhook.RawEventRow) ([16]byte, error) {
@@ -182,7 +182,7 @@ func (m *fakeMetrics) IncReceived(_ string, o webhook.Outcome, t webhook.TenantI
 	m.receivedTenants = append(m.receivedTenants, t)
 	m.receivedHasTenant = append(m.receivedHasTenant, has)
 }
-func (m *fakeMetrics) ObserveAck(string, time.Duration)              {}
+func (m *fakeMetrics) ObserveAck(string, time.Duration) {}
 func (m *fakeMetrics) IncIdempotencyConflict(string, webhook.TenantID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -298,8 +298,8 @@ func TestService_ReplayBlocked(t *testing.T) {
 func TestService_TimestampWindowViolation(t *testing.T) {
 	t.Parallel()
 	adapter := &fakeAdapter{
-		name:    "whatsapp",
-		scope:   webhook.SecretScopeApp,
+		name:  "whatsapp",
+		scope: webhook.SecretScopeApp,
 		extract: func(_ map[string][]string, _ []byte) (time.Time, error) {
 			return time.Unix(1_699_990_000, 0).UTC(), nil // 6+ min in past
 		},
@@ -428,13 +428,14 @@ func TestService_RevokedToken(t *testing.T) {
 }
 
 // --- T-G2 (TenantLevel): pre-HMAC path does NOT carry authenticated
-//     tenant in ctx, and passes the claim tenant id to VerifyTenant.
+//
+//	tenant in ctx, and passes the claim tenant id to VerifyTenant.
 func TestService_TenantLevel_ClaimNotAuthenticated(t *testing.T) {
 	t.Parallel()
 	tenant := webhook.TenantID{0xbb}
 	adapter := &fakeAdapter{
-		name:      "psp",
-		scope:     webhook.SecretScopeTenant,
+		name:  "psp",
+		scope: webhook.SecretScopeTenant,
 		verifyTen: func(c context.Context, _ webhook.TenantID, _ []byte, _ map[string][]string) error {
 			if _, ok := webhook.AuthenticatedTenantID(c); ok {
 				t.Fatal("claim tenant must not be present in ctx pre-HMAC")
@@ -458,9 +459,11 @@ func TestService_TenantLevel_ClaimNotAuthenticated(t *testing.T) {
 func TestService_TimestampMissing(t *testing.T) {
 	t.Parallel()
 	adapter := &fakeAdapter{
-		name:    "whatsapp",
-		scope:   webhook.SecretScopeApp,
-		extract: func(_ map[string][]string, _ []byte) (time.Time, error) { return time.Time{}, webhook.ErrTimestampMissing },
+		name:  "whatsapp",
+		scope: webhook.SecretScopeApp,
+		extract: func(_ map[string][]string, _ []byte) (time.Time, error) {
+			return time.Time{}, webhook.ErrTimestampMissing
+		},
 	}
 	svc, _, raw, pub, _, _, _ := newServiceUnderTest(t, []webhook.ChannelAdapter{adapter})
 
@@ -500,9 +503,11 @@ func TestService_CrossTenantSegmentation(t *testing.T) {
 func TestService_TimestampMsRejected(t *testing.T) {
 	t.Parallel()
 	adapter := &fakeAdapter{
-		name:    "whatsapp",
-		scope:   webhook.SecretScopeApp,
-		extract: func(_ map[string][]string, _ []byte) (time.Time, error) { return time.Time{}, webhook.ErrTimestampFormat },
+		name:  "whatsapp",
+		scope: webhook.SecretScopeApp,
+		extract: func(_ map[string][]string, _ []byte) (time.Time, error) {
+			return time.Time{}, webhook.ErrTimestampFormat
+		},
 	}
 	svc, _, raw, pub, _, _, _ := newServiceUnderTest(t, []webhook.ChannelAdapter{adapter})
 
@@ -557,10 +562,11 @@ func TestComputeIdempotencyKey_StableAcrossArguments(t *testing.T) {
 }
 
 // --- T-G9 (rev 3 / F-12): cross-tenant body misrouting. Authentic Meta
-//     payload addressed to tenant A's phone_number_id POSTed at tenant
-//     B's URL → 200 + drop, outcome `tenant_body_mismatch`, NO row in
-//     idempotency for B, NO publish. The cross-check fires after HMAC
-//     so signature verification is unchanged.
+//
+//	payload addressed to tenant A's phone_number_id POSTed at tenant
+//	B's URL → 200 + drop, outcome `tenant_body_mismatch`, NO row in
+//	idempotency for B, NO publish. The cross-check fires after HMAC
+//	so signature verification is unchanged.
 func TestService_TenantBodyMisrouting(t *testing.T) {
 	t.Parallel()
 	tenantA := webhook.TenantID{0xaa}

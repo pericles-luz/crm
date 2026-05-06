@@ -164,9 +164,11 @@ func TestNewService_NilAdapter(t *testing.T) {
 func TestService_Handle_TenantLevel_VerifyFail(t *testing.T) {
 	t.Parallel()
 	adapter := &fakeAdapter{
-		name:      "psp",
-		scope:     webhook.SecretScopeTenant,
-		verifyTen: func(context.Context, webhook.TenantID, []byte, map[string][]string) error { return webhook.ErrSignatureInvalid },
+		name:  "psp",
+		scope: webhook.SecretScopeTenant,
+		verifyTen: func(context.Context, webhook.TenantID, []byte, map[string][]string) error {
+			return webhook.ErrSignatureInvalid
+		},
 	}
 	svc, _, raw, pub, _, _, _ := newServiceUnderTest(t, []webhook.ChannelAdapter{adapter})
 	res := svc.Handle(context.Background(), webhook.Request{Channel: "psp", Token: "t", Body: []byte(`{}`)})
@@ -181,9 +183,11 @@ func TestService_Handle_TenantLevel_VerifyFail(t *testing.T) {
 func TestService_Handle_FutureTimestampOutOfWindow(t *testing.T) {
 	t.Parallel()
 	adapter := &fakeAdapter{
-		name:    "whatsapp",
-		scope:   webhook.SecretScopeApp,
-		extract: func(map[string][]string, []byte) (time.Time, error) { return time.Unix(1_700_000_000+10*60, 0).UTC(), nil },
+		name:  "whatsapp",
+		scope: webhook.SecretScopeApp,
+		extract: func(map[string][]string, []byte) (time.Time, error) {
+			return time.Unix(1_700_000_000+10*60, 0).UTC(), nil
+		},
 	}
 	svc, _, raw, pub, _, _, _ := newServiceUnderTest(t, []webhook.ChannelAdapter{adapter})
 	res := svc.Handle(context.Background(), webhook.Request{Channel: "whatsapp", Token: "t", Body: []byte(`{}`)})

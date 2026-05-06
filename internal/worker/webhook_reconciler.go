@@ -27,12 +27,12 @@ type ReconcilerDB interface {
 // publisher. We re-parse jsonb headers via a thin adapter rather than
 // importing pgtype here to keep the surface minimal.
 type UnpublishedRow struct {
-	ID        [16]byte
-	TenantID  webhook.TenantID
-	Channel   string
-	Payload   []byte
-	Headers   map[string][]string
-	Received  time.Time
+	ID       [16]byte
+	TenantID webhook.TenantID
+	Channel  string
+	Payload  []byte
+	Headers  map[string][]string
+	Received time.Time
 }
 
 // Reconciler scans for webhook events that landed in raw_event but
@@ -40,15 +40,15 @@ type UnpublishedRow struct {
 // safe to run multiple replicas: SELECT … FOR UPDATE SKIP LOCKED
 // partitions work between replicas at row granularity.
 type Reconciler struct {
-	src         UnpublishedSource
-	publisher   webhook.EventPublisher
-	rawEvents   webhook.RawEventStore
-	clock       webhook.Clock
-	tickEvery   time.Duration
-	staleAfter  time.Duration
-	alertAfter  time.Duration
-	batchSize   int
-	onStale     func(eventID [16]byte, age time.Duration) // nil-safe alerter hook
+	src        UnpublishedSource
+	publisher  webhook.EventPublisher
+	rawEvents  webhook.RawEventStore
+	clock      webhook.Clock
+	tickEvery  time.Duration
+	staleAfter time.Duration
+	alertAfter time.Duration
+	batchSize  int
+	onStale    func(eventID [16]byte, age time.Duration) // nil-safe alerter hook
 }
 
 // UnsableSource is the read side that yields candidate rows. Splitting

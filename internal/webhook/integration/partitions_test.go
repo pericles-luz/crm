@@ -18,16 +18,16 @@ import (
 // app-side cron must have created tomorrow's partition before the
 // boundary. We exercise that path by:
 //
-//   1. Creating tomorrow's and yesterday's partitions via the
-//      webhook_create_raw_event_partition function (the same SQL the
-//      production cron runs).
-//   2. Inserting one row in yesterday's window, one in today's, one
-//      in tomorrow's.
-//   3. Confirming all three land without error and route to distinct
-//      partition tables.
-//   4. Dropping yesterday's partition via
-//      webhook_drop_raw_event_partition. The DROP must succeed and
-//      the row count for the parent table drops accordingly.
+//  1. Creating tomorrow's and yesterday's partitions via the
+//     webhook_create_raw_event_partition function (the same SQL the
+//     production cron runs).
+//  2. Inserting one row in yesterday's window, one in today's, one
+//     in tomorrow's.
+//  3. Confirming all three land without error and route to distinct
+//     partition tables.
+//  4. Dropping yesterday's partition via
+//     webhook_drop_raw_event_partition. The DROP must succeed and
+//     the row count for the parent table drops accordingly.
 func TestPartitions_DailyBoundaryCrossing(t *testing.T) {
 	h := startHarness(t)
 	h.truncate(t)
