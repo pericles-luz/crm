@@ -241,8 +241,18 @@ func TestBuildInternalHandler_DisabledWhenDepsUnset(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(string) string{
 		"both_unset": func(string) string { return "" },
-		"only_db":    func(k string) string { if k == "DATABASE_URL" { return "postgres://x" }; return "" },
-		"only_redis": func(k string) string { if k == envRedisURL { return "redis://x" }; return "" },
+		"only_db": func(k string) string {
+			if k == "DATABASE_URL" {
+				return "postgres://x"
+			}
+			return ""
+		},
+		"only_redis": func(k string) string {
+			if k == envRedisURL {
+				return "redis://x"
+			}
+			return ""
+		},
 	}
 	for name, getenv := range cases {
 		getenv := getenv

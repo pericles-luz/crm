@@ -14,11 +14,11 @@ type Clock func() time.Time
 // UseCase is the Ask decision pipeline. Construct one at startup and reuse;
 // it is safe for concurrent use as long as every embedded port is.
 type UseCase struct {
-	repo  Repository
-	rate  RateLimiter
-	flag  FeatureFlag
-	log   Logger
-	now   Clock
+	repo   Repository
+	rate   RateLimiter
+	flag   FeatureFlag
+	log    Logger
+	now    Clock
 	maxLen int
 }
 

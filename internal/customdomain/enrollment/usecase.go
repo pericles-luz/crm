@@ -77,10 +77,10 @@ type Result struct {
 // Quota holds the four rolling-window thresholds. Construct via
 // DefaultQuota or override per-tenant for premium plans.
 type Quota struct {
-	Hourly   int
-	Daily    int
-	Monthly  int
-	HardCap  int
+	Hourly  int
+	Daily   int
+	Monthly int
+	HardCap int
 }
 
 // DefaultQuota returns the F45 spec defaults (5/h, 20/d, 50/mo, 25 active).

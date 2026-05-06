@@ -33,8 +33,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	pgpool "github.com/pericles-luz/crm/internal/adapter/db/postgres"
-	pgstore "github.com/pericles-luz/crm/internal/adapter/store/postgres"
 	crmslog "github.com/pericles-luz/crm/internal/adapter/observability/slog"
+	pgstore "github.com/pericles-luz/crm/internal/adapter/store/postgres"
 	tlsasktransport "github.com/pericles-luz/crm/internal/adapter/transport/http/tlsask"
 	"github.com/pericles-luz/crm/internal/customdomain/featureflag"
 	"github.com/pericles-luz/crm/internal/customdomain/ratelimit/sliding"
