@@ -24,3 +24,10 @@ behaviour stay aligned. See `scripts/coverage-check.sh` for the gate script.
   `./internal/ai/...` (kept separate so it can iterate independently of `ci`).
 - `paperclip-lint.yml` — runs the paperclip-lint analyzers (nobodyreread,
   nosecrets, nomathrand) against the tree.
+- `govulncheck.yml` — SIN-62298 security gate. Uses
+  `golang/govulncheck-action@v1` in source mode to fail PRs that
+  introduce a *called* stdlib or dependency CVE. Imported-but-uncalled
+  and module-required-but-uncalled findings are reported but
+  non-failing. Full `-show verbose` output is uploaded as the
+  `govulncheck-verbose` artifact (30d retention) so ADR residual-risk
+  sections and incident triage can cite a stable build URL.

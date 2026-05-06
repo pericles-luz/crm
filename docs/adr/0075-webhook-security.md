@@ -393,4 +393,10 @@ Payload vai para `raw_event.raw_payload` (criptografia em repouso por Postgres T
 - **Token leak via log do operador** (e.g. operator paste em log externo). Mitigação interna: `webhook_token` proibido em log via lint + redactor middleware. Mitigação humana: docs. F-12 cross-check elimina o impacto cross-tenant mesmo no caso pessimista.
 - **NATS down > 1h** com `published_at IS NULL` acumulando — alerting cobre (§5), mas operador precisa agir.
 
+### Defesas operacionais — CI gates
+
+Os controles abaixo não são parte do desenho deste ADR mas protegem a superfície na qual ele apoia.
+
+- **`govulncheck` é um CI gate** ([SIN-62298](/SIN/issues/SIN-62298)). Workflow `.github/workflows/govulncheck.yml` roda `golang/govulncheck-action@v1` em modo `source` em todo PR contra `main` e em todo push para `main`. Job falha em qualquer CVE *called* (stdlib ou dependência). Findings *imported-but-uncalled* e *module-required-but-uncalled* são reportados mas não falham o job — threshold acordado SecurityEngineer/CTO em [SIN-62297](/SIN/issues/SIN-62297). Relatório completo `-show verbose` é uploaded como artifact `govulncheck-verbose` (30d) e pode ser citado por URL estável em PRs e em sessões deste ADR. Esse gate fecha o gap descoberto em SIN-62297 (16 stdlib CVEs reachable no merge bridge porque nenhum gate nomeado existia no repo).
+
 
