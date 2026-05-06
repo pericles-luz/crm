@@ -41,8 +41,14 @@ jobs:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
+      # SHA-pinned per SIN-62306: extends SIN-62303's third-party SHA-pin
+      # convention to the CVE-gate action itself. `repo-checkout: true` runs
+      # this action *before* any repo-side step, so a re-published `@v1` tag
+      # would influence the checked-out tree before our own gate logic runs;
+      # pinning to a commit SHA freezes the bytes. Bump SHA + trailing version
+      # comment together when upgrading.
       - name: govulncheck gate (fails on called CVEs)
-        uses: golang/govulncheck-action@v1
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee  # v1.0.4
         with:
           go-version-input: stable
           repo-checkout: true
