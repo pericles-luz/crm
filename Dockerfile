@@ -14,7 +14,11 @@
 # syntax=docker/dockerfile:1.7
 
 # --- builder stage ---------------------------------------------------------
-FROM golang:1.25.9-alpine@sha256:5caaf1cca9dc351e13deafbc3879fd4754801acba8653fa9540cea125d01a71f AS builder
+# DO NOT MERGE — SIN-62301 positive-control throwaway. Regressing the builder
+# to golang:1.24.5-alpine to confirm the docker-smoke PR-time gate fails
+# fail-closed when go.mod's `toolchain go1.25.9` directive is not satisfied
+# by the build sandbox. See https://github.com/pericles-luz/crm/pull/45.
+FROM golang:1.24.5-alpine AS builder
 
 WORKDIR /src
 
