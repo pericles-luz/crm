@@ -1,0 +1,73 @@
+# CI security gate for SIN-62298: catch reachable stdlib/dependency CVEs at
+# PR time instead of at manual handoff.
+#
+# Background. SIN-62297's bridge merge surfaced 16 *called* stdlib CVEs at
+# go 1.25.0 (TLS handshake DoS, x509 panic on DSA cert, ALPN info leak,
+# asn1/pem/url quadratic & memory-exhaustion). None of those CVEs were
+# caught by an automated gate because no security gate existed in this
+# repo before this workflow. SIN-62297 patched today's reachable CVEs by
+# bumping the toolchain to go1.25.9; this workflow is layer 2 of the
+# defense-in-depth answer — it catches the *next* regression at PR time.
+#
+# Behaviour.
+#   1. The official `golang/govulncheck-action@v1` runs in the default
+#      mode (source) and gates the merge. Default flags fail the job on
+#      any *called* CVE — the threshold settled in the SIN-62297 thread.
+#      Imported-but-uncalled and module-required-but-uncalled findings
+#      are reported but do not fail the job.
+#   2. A second pass runs `govulncheck -mode source -show verbose ./...`
+#      and uploads the full verbose text as a workflow artifact, so ADR
+#      residual-risk sections (and incident triage) can cite a stable
+#      build URL instead of a one-off terminal run.
+#
+# Failure mode of the gate is fail-closed (the secure default).
+#
+# Out of scope (separate tickets): gosec, gitleaks, dependency-review,
+# SBOM, CodeQL.
+
+name: govulncheck
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: govulncheck gate (fails on called CVEs)
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: stable
+          repo-checkout: true
+
+      # Re-run govulncheck to capture the full -show verbose report as a
+      # workflow artifact. `if: !cancelled()` ensures we still upload
+      # evidence when the gate above fails — that is exactly when the
+      # verbose report is most useful. `|| true` prevents this step from
+      # masking the gate outcome: if the gate failed the job is already
+      # failing, and if the gate passed but this re-run finds something
+      # new the artifact still records it.
+      - name: capture verbose report
+        if: ${{ !cancelled() }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          mkdir -p _govulncheck
+          "$(go env GOPATH)/bin/govulncheck" \
+            -mode source -show verbose ./... \
+            > _govulncheck/govulncheck-verbose.txt 2>&1 || true
+
+      - name: upload verbose report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: govulncheck-verbose
+          path: _govulncheck/govulncheck-verbose.txt
+          if-no-files-found: error
+          retention-days: 30
