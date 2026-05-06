@@ -57,6 +57,10 @@ Defined in [`.github/workflows/gitleaks.yml`](../../.github/workflows/gitleaks.y
 
 The `v2` action wrapper hardcodes `--exit-code=2` and on `pull_request` / `push` events scopes `--log-opts` to the diff range. Neither matches this gate's spec. Direct invocation pins the version, makes the args reviewable in-repo, and guarantees the orphan-history sweep runs on every event.
 
+### Why we SHA-pin third-party GitHub-hosted actions
+
+All third-party actions referenced from `gitleaks.yml` (and `govulncheck.yml`) are pinned by 40-char commit SHA, with the resolved version in a trailing `# v<version>` comment — never by a moving tag like `@v4`. A mutable tag can be re-pointed by the upstream owner (or by an attacker who compromises the publish flow) at any commit; pinning to a SHA freezes the exact bytes of the action's code, so a tag re-publish cannot smuggle malicious workflow code into our CI without a corresponding repo-side change being reviewed and merged. This is an application of **OWASP A06: Vulnerable & Outdated Components** and **CIS GitHub Actions Benchmark §3** to the workflow-supply-chain layer that sits beneath the runtime-binary supply-chain layer (where the `gitleaks` tarball is already sha256-verified). When upgrading an action, look up the new release's commit SHA, update **both** the `@<sha>` and the trailing version comment in the same edit, and re-run the workflow on a PR before merging — never edit only the comment. See [SIN-62303](/SIN/issues/SIN-62303) for the introduction of this convention.
+
 ## Operating posture
 
 - **Fail-closed.** A finding fails the job. There is no soft-fail mode and no `continue-on-error`.
