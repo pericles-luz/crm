@@ -539,6 +539,71 @@ func TestServeVerify_BadID(t *testing.T) {
 	}
 }
 
+// TestServeVerify_FlipsToVerifiedWithDNSSEC is the SIN-62313 acceptance
+// criterion at the handler boundary: when the management.UseCase
+// returns a verified outcome with VerifiedWithDNSSEC=true (i.e. the
+// SIN-62242 resolver matched the TXT and saw the AD bit), the rendered
+// row carries the "Verificado" badge AND the DNSSEC indicator. The
+// existing TestServeVerify_RendersUpdatedRow only checked the badge;
+// this new case adds the DNSSEC assertion explicitly.
+func TestServeVerify_FlipsToVerifiedWithDNSSEC(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	verified := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	uc := &fakeUseCase{
+		verifyResp: management.VerifyOutcome{
+			Verified: true,
+			Domain: management.Domain{
+				ID: id, Host: "shop.example.com",
+				VerifiedAt: &verified, VerifiedWithDNSSEC: true,
+			},
+		},
+	}
+	mux := newServeMux(newHandlerForTest(t, uc))
+	rec := htmxRequest(t, mux, http.MethodPost, "/api/customdomains/"+id.String()+"/verify")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Verificado") {
+		t.Fatalf("expected verified badge: %s", body)
+	}
+	if !strings.Contains(body, "DNSSEC") {
+		t.Fatalf("expected DNSSEC indicator when VerifiedWithDNSSEC=true: %s", body)
+	}
+}
+
+// TestServeVerify_FlipsToVerifiedWithoutDNSSEC mirrors
+// FlipsToVerifiedWithDNSSEC but asserts the DNSSEC badge is omitted
+// when the resolver did not see the AD bit. The pair locks down both
+// halves of the `verified_with_dnssec` contract from SIN-62313.
+func TestServeVerify_FlipsToVerifiedWithoutDNSSEC(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	verified := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	uc := &fakeUseCase{
+		verifyResp: management.VerifyOutcome{
+			Verified: true,
+			Domain: management.Domain{
+				ID: id, Host: "shop.example.com",
+				VerifiedAt: &verified, VerifiedWithDNSSEC: false,
+			},
+		},
+	}
+	mux := newServeMux(newHandlerForTest(t, uc))
+	rec := htmxRequest(t, mux, http.MethodPost, "/api/customdomains/"+id.String()+"/verify")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Verificado") {
+		t.Fatalf("expected verified badge: %s", body)
+	}
+	if strings.Contains(body, "DNSSEC") {
+		t.Fatalf("DNSSEC indicator must be absent when VerifiedWithDNSSEC=false: %s", body)
+	}
+}
+
 func TestServeVerify_TokenMismatchRendersErrorRow(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
