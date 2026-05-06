@@ -203,4 +203,3 @@ func aiStructFieldLabel(t types.Type, field int) (string, bool) {
 	}
 	return tn.Name() + "." + st.Field(field).Name(), true
 }
-
