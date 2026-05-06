@@ -84,7 +84,15 @@ services:
     env_file: .env
     environment:
       HTTP_ADDR: ":8080"
+      # SIN-62243 F45 — internal listener for /internal/tls/ask.
+      # NOT published in `ports:` — only the docker bridge network can
+      # reach it (Caddy via `app:8081`).
+      INTERNAL_HTTP_ADDR: ":8081"
       DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crm}?sslmode=disable}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Default ON. Flip to "false" to globally disable on-demand TLS.
+      CUSTOMDOMAIN_ASK_ENABLED: ${CUSTOMDOMAIN_ASK_ENABLED:-true}
+    expose: ["8081"]
     volumes:
       - ../../go.mod:/src/go.mod:ro
       - ../../go.sum:/src/go.sum:ro
