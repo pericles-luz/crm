@@ -290,6 +290,62 @@ func TestServeEnroll_InvalidHost(t *testing.T) {
 	}
 }
 
+// TestServeEnroll_ErrorPreservesCSRF guards the regression CTO flagged on
+// PR #41: the wizard-error template must keep a usable CSRF token so a
+// retry without reloading the page is accepted by VerifyCSRF.
+func TestServeEnroll_ErrorPreservesCSRF(t *testing.T) {
+	t.Parallel()
+	uc := &fakeUseCase{enrollErr: management.ErrInvalidHost}
+	h := newHandlerForTest(t, uc)
+	mux := newServeMux(h)
+
+	primer := httptest.NewRecorder()
+	primerReq := withTenant(httptest.NewRequest(http.MethodGet, "/tenant/custom-domains/new", nil), testTenant)
+	mux.ServeHTTP(primer, primerReq)
+	cookie := primer.Result().Cookies()[0]
+	token := cookie.Value
+
+	form := url.Values{}
+	form.Set("host", "127.0.0.1")
+	form.Set("_csrf", token)
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/tenant/custom-domains", strings.NewReader(form.Encode()))
+	req1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req1.AddCookie(cookie)
+	req1 = withTenant(req1, testTenant)
+	mux.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("first POST status = %d", rec1.Code)
+	}
+	body := rec1.Body.String()
+	if !strings.Contains(body, `value="`+token+`"`) {
+		t.Fatalf("error response stripped CSRF token; expected to see %q in form: %s", token, body)
+	}
+	if strings.Contains(body, `value=""`) {
+		t.Fatalf("error response wrote an empty CSRF token: %s", body)
+	}
+
+	// Resubmit using the same cookie+token. The handler must accept the
+	// CSRF check; the use-case still rejects (same scripted error) so we
+	// re-receive 422, NOT 403.
+	uc.enrollErr = management.ErrInvalidHost
+	form2 := url.Values{}
+	form2.Set("host", "shop.example.com")
+	form2.Set("_csrf", token)
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/tenant/custom-domains", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.AddCookie(cookie)
+	req2 = withTenant(req2, testTenant)
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code == http.StatusForbidden {
+		t.Fatalf("resubmit was rejected by CSRF (403) instead of being processed")
+	}
+	if rec2.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("resubmit status = %d, want 422", rec2.Code)
+	}
+}
+
 func TestServeEnroll_PrivateIPCopy(t *testing.T) {
 	t.Parallel()
 	uc := &fakeUseCase{enrollErr: management.ErrPrivateIP}

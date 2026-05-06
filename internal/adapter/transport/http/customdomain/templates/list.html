@@ -14,13 +14,12 @@
 
   <div id="wizard" aria-live="polite"></div>
 
-  <div id="domain-list">
-    {{template "list_partial" .}}
-  </div>
+  {{template "list_partial" .}}
 </section>
 {{end}}
 
 {{define "list_partial"}}
+<div id="domain-list">
 {{if .Domains}}
 <table class="domain-table" summary="Lista de domínios personalizados deste tenant">
   <thead>
@@ -109,4 +108,5 @@
 {{else}}
 <p class="empty-state">Nenhum domínio cadastrado ainda.</p>
 {{end}}
+</div>
 {{end}}

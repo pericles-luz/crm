@@ -3,7 +3,6 @@ package customdomain
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -245,7 +244,7 @@ func (h *Handler) serveInstructions(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseID(r)
 	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
 		return
 	}
 	d, err := h.uc.Get(r.Context(), tenant, id)
@@ -272,7 +271,7 @@ func (h *Handler) serveStatusRow(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseID(r)
 	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
 		return
 	}
 	d, err := h.uc.Get(r.Context(), tenant, id)
@@ -300,7 +299,7 @@ func (h *Handler) serveDeleteModal(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseID(r)
 	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
 		return
 	}
 	d, err := h.uc.Get(r.Context(), tenant, id)
@@ -331,7 +330,7 @@ func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseID(r)
 	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
 		return
 	}
 	out, err := h.uc.Verify(r.Context(), tenant, id)
@@ -356,13 +355,13 @@ func (h *Handler) serveSetPaused(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseID(r)
 	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
 		return
 	}
 	pausedStr := r.URL.Query().Get("paused")
 	paused, err := strconv.ParseBool(pausedStr)
 	if err != nil {
-		http.Error(w, "paused obrigatório (true|false)", http.StatusBadRequest)
+		http.Error(w, "Parâmetro paused obrigatório (true|false).", http.StatusBadRequest)
 		return
 	}
 	d, err := h.uc.SetPaused(r.Context(), tenant, id, paused)
@@ -391,7 +390,7 @@ func (h *Handler) serveDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseID(r)
 	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
 		return
 	}
 	if err := h.uc.Delete(r.Context(), tenant, id); err != nil {
@@ -413,11 +412,7 @@ func (h *Handler) serveDelete(w http.ResponseWriter, r *http.Request) {
 		views = append(views, h.viewFor(d, nil, csrf))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Wrap in a div so the outer #domain-list swap still has the right
-	// shape after the DELETE response.
-	fmt.Fprintf(w, `<div id="domain-list">`)
 	_ = renderTemplate(w, "list_partial", listPartialData{CSRFToken: csrf, Domains: views})
-	fmt.Fprintf(w, `</div>`)
 }
 
 func (h *Handler) renderRow(w http.ResponseWriter, _ *http.Request, d management.Domain, lastErr error, csrf string) {
@@ -425,11 +420,21 @@ func (h *Handler) renderRow(w http.ResponseWriter, _ *http.Request, d management
 	_ = renderTemplate(w, "row", h.viewFor(d, lastErr, csrf))
 }
 
-func (h *Handler) renderWizardError(w http.ResponseWriter, _ *http.Request, msg string) {
+func (h *Handler) renderWizardError(w http.ResponseWriter, r *http.Request, msg string) {
+	// Reuse the existing CSRF cookie when valid so the rendered form can
+	// be resubmitted without forcing a page reload. IssueCSRFToken
+	// rotates the cookie only when there is none or the existing one is
+	// invalid; either way the returned token matches the cookie that
+	// arrives on the next POST.
+	csrf, err := IssueCSRFToken(w, r, h.csrf)
+	if err != nil {
+		h.serverError(w, r, err)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnprocessableEntity)
 	_ = renderTemplate(w, "wizard_step1", map[string]any{
-		"CSRFToken": "",
+		"CSRFToken": csrf,
 		"Error":     msg,
 	})
 }
