@@ -115,10 +115,11 @@ func (errSvcStore) Active(context.Context, string) (slugreservation.Reservation,
 
 func TestRequireSlugAvailable_StoreError(t *testing.T) {
 	t.Parallel()
-	red := newFakeRedirectStore()
+	clk := fixedClock{t: time.Now()}
+	red := newFakeRedirectStore(clk)
 	audit := &fakeAudit{}
 	slack := &fakeSlack{}
-	svc, err := slugreservation.NewService(errSvcStore{}, red, audit, slack, fixedClock{t: time.Now()})
+	svc, err := slugreservation.NewService(errSvcStore{}, red, audit, slack, clk)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
