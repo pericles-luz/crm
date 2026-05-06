@@ -244,6 +244,40 @@ func TestLogin_HostInvalid_NoEnumerate(t *testing.T) {
 	if errors.Is(err, ErrTenantNotFound) {
 		t.Fatalf("ErrTenantNotFound leaked through Login — should collapse to ErrInvalidCredentials")
 	}
+
+	// Anti-enumeration via timing: SIN-62305 — without a dummy-verify on
+	// the host-not-found path, an on-the-wire attacker could distinguish
+	// "unknown host" (~µs) from "known host, unknown email" (~100ms,
+	// argon2id) and enumerate the customer list of the SaaS.
+	// Mirror the median-of-3 / ≥25% bound used in the wrong-password
+	// branch so a regression (early-return short-circuit) is caught
+	// without being CI-flaky.
+	ctx := context.Background()
+	measure := func(host string) time.Duration {
+		var samples [3]time.Duration
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			_, _ = svc.Login(ctx, host, "alice@acme.test", "WRONG", nil, "")
+			samples[i] = time.Since(start)
+		}
+		// median of 3
+		if samples[0] > samples[1] {
+			samples[0], samples[1] = samples[1], samples[0]
+		}
+		if samples[1] > samples[2] {
+			samples[1], samples[2] = samples[2], samples[1]
+		}
+		if samples[0] > samples[1] {
+			samples[0], samples[1] = samples[1], samples[0]
+		}
+		return samples[1]
+	}
+	wrongPwd := measure("acme.crm.local")
+	hostInvalid := measure("unknown.example.com")
+
+	if hostInvalid*4 < wrongPwd {
+		t.Fatalf("host-not-found branch too fast: host-invalid=%v wrong-pwd=%v — dummy-verify likely missing on host-not-found path", hostInvalid, wrongPwd)
+	}
 }
 
 func TestLogin_TenantResolverInfraError_Propagates(t *testing.T) {
