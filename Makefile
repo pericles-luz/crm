@@ -1,5 +1,7 @@
 # CRM — Fase 0 Makefile (SIN-62208).
-# Targets: up, down, logs, test, lint, notenant, migrate-up, migrate-down, seed-stg, smoke-alert, verify-vendor.
+# Targets: up, down, logs, test, test-integration, test-integration-cover,
+#          lint, lint-aicache, notenant, migrate-up, migrate-down, seed-stg,
+#          smoke-alert, verify-vendor.
 
 SHELL := /bin/bash
 COMPOSE_DIR := deploy/compose
@@ -13,9 +15,17 @@ MIGRATE_IMAGE := migrate/migrate:v4.17.1
 MIGRATIONS_DIR := $(CURDIR)/migrations
 COMPOSE_NETWORK := crm_crm
 
+# Integration test coverage threshold (SIN-62277 acceptance criterion).
+# The webhook stack + its adapters must clear this bar measured across
+# unit + integration runs combined.
+ITEST_COVER_PKGS := github.com/pericles-luz/crm/internal/webhook,github.com/pericles-luz/crm/internal/adapter/store/postgres,github.com/pericles-luz/crm/internal/adapter/channel/meta
+ITEST_COVER_THRESHOLD ?= 85.0
+
 .DEFAULT_GOAL := help
 
-.PHONY: help up down logs test lint lint-aicache migrate-up migrate-down seed-stg smoke-alert verify-vendor
+.PHONY: help up down logs test test-integration test-integration-cover \
+        lint lint-aicache notenant migrate-up migrate-down seed-stg \
+        smoke-alert verify-vendor
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -35,6 +45,37 @@ logs: ## Tail logs from every service
 
 test: ## Run Go test suite with coverage
 	$(GO) test ./... -race -count=1 -cover
+
+test-integration: ## Run webhook integration suite (Postgres real, build tag `integration`)
+	@if [ -z "$$TEST_POSTGRES_DSN" ]; then \
+		echo "test-integration: TEST_POSTGRES_DSN not set; falling back to testcontainers (requires Docker)."; \
+	fi
+	$(GO) test -tags integration -count=1 -timeout 300s \
+		./internal/webhook/integration/...
+
+test-integration-cover: ## Run unit + integration with combined coverage and enforce >=$(ITEST_COVER_THRESHOLD)%
+	@if [ -z "$$TEST_POSTGRES_DSN" ]; then \
+		echo "test-integration-cover: TEST_POSTGRES_DSN not set; falling back to testcontainers (requires Docker)."; \
+	fi
+	$(GO) test -count=1 -coverpkg=$(ITEST_COVER_PKGS) \
+		-coverprofile=coverage.unit.out \
+		./internal/webhook/... ./internal/adapter/...
+	$(GO) test -tags integration -count=1 -timeout 300s \
+		-coverpkg=$(ITEST_COVER_PKGS) \
+		-coverprofile=coverage.itest.out \
+		./internal/webhook/integration/...
+	@{ \
+		head -1 coverage.unit.out; \
+		tail -n +2 coverage.unit.out; \
+		tail -n +2 coverage.itest.out; \
+	} > coverage.combined.out
+	@pct=$$($(GO) tool cover -func=coverage.combined.out | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
+		echo "combined coverage (webhook+adapters): $${pct}%"; \
+		awk -v p="$$pct" -v t="$(ITEST_COVER_THRESHOLD)" \
+			'BEGIN { exit !(p+0 >= t+0) }' || { \
+			echo "coverage $${pct}% below $(ITEST_COVER_THRESHOLD)% threshold (SIN-62277 quality bar)"; \
+			exit 1; \
+		}
 
 lint: notenant ## Run go vet + the notenant analyzer over internal/ (SIN-62232 / ADR 0071)
 	$(GO) vet ./...
