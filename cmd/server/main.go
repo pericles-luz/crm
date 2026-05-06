@@ -127,9 +127,19 @@ func executeAllWith(ctx context.Context, getenv func(string) string, dial dialFn
 }
 
 func run(ctx context.Context, addr string) error {
+	mux := newMux()
+	cdHandler, cdCleanup := buildCustomDomainHandler(ctx, os.Getenv)
+	defer cdCleanup()
+	if cdHandler != nil {
+		// SIN-62259 routes are mounted at the root of the public mux. The
+		// handler returned by buildCustomDomainHandler already includes the
+		// /static/ tree.
+		mux.Handle("/", cdHandler)
+		log.Printf("crm: custom-domain UI mounted on public listener")
+	}
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newMux(),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
