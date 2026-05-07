@@ -113,6 +113,57 @@ defined there apply BEFORE the handler reaches the validator:
 The validator stays unaware of rate limits — it must remain a pure
 function of (host, expectedToken, resolver answer) for testability.
 
+### §4 — Production gates (SIN-62334 F53)
+
+The per-tenant enrollment quotas (5/h, 20/d, 50/mo new domains, 25
+active hard cap) and the Let's Encrypt circuit breaker (5 failures /
+1 h → 24 h freeze) are independent layers of defense in depth alongside
+the §3 handler-level rate limits. They MUST be wired against the
+production Redis-backed adapters before the public flag is flipped.
+
+**Hard-error boot contract.** When `CUSTOM_DOMAIN_UI_ENABLED=1` is set
+without `REDIS_URL`, `cmd/server` MUST refuse to boot. The check fires
+in `cmd/server.runWith` via `EnrollmentRedisRequired(getenv)` BEFORE
+`buildCustomDomainHandler`; if the gate is misconfigured the process
+exits non-zero so the orchestrator restarts and the operator sees the
+failed boot. A startup `WARN` is NOT acceptable — WARN is not a
+control. With the placeholders in the same binary, the only brake
+against LE quota exhaustion at scale would be the 3/min/host rate
+limiter on `/internal/tls/ask`, and a single attacker rotating across
+hosts can blow through the upstream LE issuance budget.
+
+**Single env-var contract.** `REDIS_URL` (the same env var the internal
+listener already consumes) drives the swap. There is no second toggle
+like `CUSTOM_DOMAIN_QUOTA_BACKEND=redis` — Redis presence IS the
+configuration.
+
+**Adapter wiring.** The three ports plug in as follows:
+
+- `enrollment.CountStore` → `pgstore.NewEnrollmentCountStore` (Postgres
+  `COUNT(*)` against `tenant_custom_domains WHERE deleted_at IS NULL`,
+  the same partial unique index the management UI reads from). Source
+  of truth IS the relational data; a Redis-set adapter would require
+  lock-step `SADD`/`SREM` with every soft-delete and silently bypass
+  the cap on Redis loss.
+- `enrollment.WindowCounter` → `rediswindow.New` (sorted-set sliding
+  window per `(tenantID, window)` key, atomic via Lua, TTL = window +
+  60 s grace).
+- `circuitbreaker.State` → `redisstate.New` (sliding-window failure
+  log + `SET … PX freezeMs` frozen flag, persisted across server
+  restarts so a 24h freeze survives a deploy and is enforced
+  consistently across all replicas — multi-replica safe by
+  construction).
+
+The placeholder types (`zeroCount`, `passWindowCounter`, `zeroBreaker`)
+remain in `cmd/server/customdomain_wire.go` for the test path that
+drives `buildCustomDomainHandler` without Redis. They are unreachable
+from production because `runWith` errors out before the function is
+called.
+
+**Reversibility.** Unset `CUSTOM_DOMAIN_UI_ENABLED` to retire the
+public flow; the wire-up returns nil and the public listener serves
+only `/health`. No data migration; quota state ages out on its TTLs.
+
 ## Consequences
 
 - The validator is small (1 use-case file, 1 blocklist file, 1 ports

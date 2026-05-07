@@ -3,7 +3,7 @@
 # Postmortem follow-up to SIN-62297. PR #28 merged 8/8 green, then `cd-stg`
 # failed 23s later at `[builder 4/7] RUN go mod download` because the
 # Dockerfile builder was pinned at `golang:1.24.5-alpine` while go.mod had
-# been bumped to `toolchain go1.25.9`. None of the eight PR-time CI jobs
+# been bumped to `toolchain go1.26.3`. None of the eight PR-time CI jobs
 # actually exercised `docker build` — they all use `actions/setup-go`, which
 # installs Go independently of the Dockerfile builder image — so the
 # Dockerfile-vs-go.mod consistency was uncheckable until after merge.
