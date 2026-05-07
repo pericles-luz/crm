@@ -8,7 +8,7 @@ require (
 	github.com/a-h/templ v0.2.793
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/miekg/dns v1.1.72
 	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/client_model v0.6.2
