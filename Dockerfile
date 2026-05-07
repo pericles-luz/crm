@@ -14,7 +14,7 @@
 # syntax=docker/dockerfile:1.7
 
 # --- builder stage ---------------------------------------------------------
-FROM golang:1.25.9-alpine@sha256:5caaf1cca9dc351e13deafbc3879fd4754801acba8653fa9540cea125d01a71f AS builder
+FROM golang:1.25.10-alpine@sha256:8d22e29d960bc50cd025d93d5b7c7d220b1ee9aa7a239b3c8f55a57e987e8d45 AS builder
 
 WORKDIR /src
 
@@ -29,8 +29,8 @@ COPY adapters ./adapters
 
 # CGO_ENABLED=0 + -trimpath + -ldflags="-s -w" yields a small, reproducible,
 # statically linked binary. GOFLAGS prevents the toolchain from auto-downloading
-# a different Go version at build time (we want the pinned 1.25.9 alpine image,
-# matching go.mod's `toolchain go1.25.9` directive — bumped here as a follow-up
+# a different Go version at build time (we want the pinned 1.25.10 alpine image,
+# matching go.mod's `toolchain go1.25.10` directive — bumped here as a follow-up
 # to SIN-62297 c4b2c73 toolchain pin so the in-container compile matches CI).
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local
 RUN go build -trimpath -ldflags="-s -w" -o /out/crm ./cmd/server
