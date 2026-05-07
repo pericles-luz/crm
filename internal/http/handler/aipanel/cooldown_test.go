@@ -19,7 +19,7 @@ func TestCooldownFragment_QuotaReason_ContainsExpectedAttrs(t *testing.T) {
 	for _, want := range []string{
 		`disabled`,
 		`hx-disable-elt="this"`,
-		`--cooldown-duration:30000ms`,
+		`data-cooldown-bucket="30"`,
 		`Próxima geração em 30 s`,
 		`data-reason="quota"`,
 		`aria-disabled="true"`,
@@ -51,8 +51,8 @@ func TestCooldownFragment_RoundsSecondsUp(t *testing.T) {
 	if !strings.Contains(out, "Próxima geração em 2 s") {
 		t.Fatalf("expected '2 s' caption (1.5s rounds up); got:\n%s", out)
 	}
-	if !strings.Contains(out, "--cooldown-duration:1500ms") {
-		t.Fatalf("expected --cooldown-duration:1500ms; got:\n%s", out)
+	if !strings.Contains(out, `data-cooldown-bucket="2"`) {
+		t.Fatalf("expected data-cooldown-bucket=\"2\" (1.5s ceils to 2); got:\n%s", out)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestCooldownRenderer_WritesFragment(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
 	CooldownRenderer(rec, req, 6*time.Second, "quota")
-	if !strings.Contains(rec.Body.String(), "--cooldown-duration:6000ms") {
-		t.Fatalf("body missing cooldown attr:\n%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `data-cooldown-bucket="6"`) {
+		t.Fatalf("body missing cooldown bucket attr:\n%s", rec.Body.String())
 	}
 }
 
@@ -107,10 +107,10 @@ func TestFragmentFromHeaders_PrefersMs(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "--cooldown-duration:12500ms") {
-		t.Fatalf("expected ms-precision; got:\n%s", out)
+	// 12500ms ceils to bucket "13" (matches the 13 s caption below).
+	if !strings.Contains(out, `data-cooldown-bucket="13"`) {
+		t.Fatalf("expected data-cooldown-bucket=\"13\"; got:\n%s", out)
 	}
-	// 12500ms = 13s rounded up.
 	if !strings.Contains(out, "Próxima geração em 13 s") {
 		t.Fatalf("expected 13 s caption; got:\n%s", out)
 	}
@@ -122,7 +122,7 @@ func TestFragmentFromHeaders_FallsBackToSeconds(t *testing.T) {
 	if err := FragmentFromHeaders(&buf, "30", "", "quota"); err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if !strings.Contains(buf.String(), "--cooldown-duration:30000ms") {
+	if !strings.Contains(buf.String(), `data-cooldown-bucket="30"`) {
 		t.Fatalf("fallback failed:\n%s", buf.String())
 	}
 }
@@ -133,7 +133,7 @@ func TestFragmentFromHeaders_BothMissingDefaultsToOneSecond(t *testing.T) {
 	if err := FragmentFromHeaders(&buf, "", "", "quota"); err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if !strings.Contains(buf.String(), "--cooldown-duration:1000ms") {
+	if !strings.Contains(buf.String(), `data-cooldown-bucket="1"`) {
 		t.Fatalf("default failed:\n%s", buf.String())
 	}
 }

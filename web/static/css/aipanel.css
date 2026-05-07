@@ -8,10 +8,11 @@
  * Both states use the same outer box dimensions so the HTMX outerHTML swap
  * does not cause layout shift (Core Web Vitals — CLS). The cooldown state
  * gets a ::before progress bar whose width is animated from 100% to 0% over
- * `--cooldown-duration` (set inline by the server-rendered fragment). When
- * the animation ends the bar is gone; HTMX re-enables the button on the next
- * user interaction (the server returns a fresh fragment once the rate-limit
- * bucket has tokens again).
+ * `--cooldown-duration`, picked by the per-second bucket selectors at the
+ * end of this file (SIN-62319 — moved off the inline `style` attribute the
+ * F29 CSP would drop). When the animation ends the bar is gone; HTMX
+ * re-enables the button on the next user interaction (the server returns a
+ * fresh fragment once the rate-limit bucket has tokens again).
  *
  * The animation keyword is `forwards` so the last frame (scaleX:0) sticks
  * around even if the browser drops a frame; defensive against jank.
@@ -82,3 +83,75 @@
     transform: scaleX(0);
   }
 }
+
+/* SIN-62319 - per-second cooldown bucket durations.
+ *
+ * The cooldown fragment in internal/http/handler/aipanel/cooldown.go used
+ * to set --cooldown-duration via an inline style attribute. Under the F29
+ * CSP (style-src 'self' 'nonce-{N}') inline styles are dropped, so the
+ * fragment now emits data-cooldown-bucket="N" and lets these static rules
+ * pick the matching duration. Anything > 60s falls into the overflow
+ * bucket and animates as 60s; the integer-second label keeps counting.
+ */
+.ai-panel-cooldown[data-cooldown-bucket="1"] { --cooldown-duration: 1s; }
+.ai-panel-cooldown[data-cooldown-bucket="2"] { --cooldown-duration: 2s; }
+.ai-panel-cooldown[data-cooldown-bucket="3"] { --cooldown-duration: 3s; }
+.ai-panel-cooldown[data-cooldown-bucket="4"] { --cooldown-duration: 4s; }
+.ai-panel-cooldown[data-cooldown-bucket="5"] { --cooldown-duration: 5s; }
+.ai-panel-cooldown[data-cooldown-bucket="6"] { --cooldown-duration: 6s; }
+.ai-panel-cooldown[data-cooldown-bucket="7"] { --cooldown-duration: 7s; }
+.ai-panel-cooldown[data-cooldown-bucket="8"] { --cooldown-duration: 8s; }
+.ai-panel-cooldown[data-cooldown-bucket="9"] { --cooldown-duration: 9s; }
+.ai-panel-cooldown[data-cooldown-bucket="10"] { --cooldown-duration: 10s; }
+.ai-panel-cooldown[data-cooldown-bucket="11"] { --cooldown-duration: 11s; }
+.ai-panel-cooldown[data-cooldown-bucket="12"] { --cooldown-duration: 12s; }
+.ai-panel-cooldown[data-cooldown-bucket="13"] { --cooldown-duration: 13s; }
+.ai-panel-cooldown[data-cooldown-bucket="14"] { --cooldown-duration: 14s; }
+.ai-panel-cooldown[data-cooldown-bucket="15"] { --cooldown-duration: 15s; }
+.ai-panel-cooldown[data-cooldown-bucket="16"] { --cooldown-duration: 16s; }
+.ai-panel-cooldown[data-cooldown-bucket="17"] { --cooldown-duration: 17s; }
+.ai-panel-cooldown[data-cooldown-bucket="18"] { --cooldown-duration: 18s; }
+.ai-panel-cooldown[data-cooldown-bucket="19"] { --cooldown-duration: 19s; }
+.ai-panel-cooldown[data-cooldown-bucket="20"] { --cooldown-duration: 20s; }
+.ai-panel-cooldown[data-cooldown-bucket="21"] { --cooldown-duration: 21s; }
+.ai-panel-cooldown[data-cooldown-bucket="22"] { --cooldown-duration: 22s; }
+.ai-panel-cooldown[data-cooldown-bucket="23"] { --cooldown-duration: 23s; }
+.ai-panel-cooldown[data-cooldown-bucket="24"] { --cooldown-duration: 24s; }
+.ai-panel-cooldown[data-cooldown-bucket="25"] { --cooldown-duration: 25s; }
+.ai-panel-cooldown[data-cooldown-bucket="26"] { --cooldown-duration: 26s; }
+.ai-panel-cooldown[data-cooldown-bucket="27"] { --cooldown-duration: 27s; }
+.ai-panel-cooldown[data-cooldown-bucket="28"] { --cooldown-duration: 28s; }
+.ai-panel-cooldown[data-cooldown-bucket="29"] { --cooldown-duration: 29s; }
+.ai-panel-cooldown[data-cooldown-bucket="30"] { --cooldown-duration: 30s; }
+.ai-panel-cooldown[data-cooldown-bucket="31"] { --cooldown-duration: 31s; }
+.ai-panel-cooldown[data-cooldown-bucket="32"] { --cooldown-duration: 32s; }
+.ai-panel-cooldown[data-cooldown-bucket="33"] { --cooldown-duration: 33s; }
+.ai-panel-cooldown[data-cooldown-bucket="34"] { --cooldown-duration: 34s; }
+.ai-panel-cooldown[data-cooldown-bucket="35"] { --cooldown-duration: 35s; }
+.ai-panel-cooldown[data-cooldown-bucket="36"] { --cooldown-duration: 36s; }
+.ai-panel-cooldown[data-cooldown-bucket="37"] { --cooldown-duration: 37s; }
+.ai-panel-cooldown[data-cooldown-bucket="38"] { --cooldown-duration: 38s; }
+.ai-panel-cooldown[data-cooldown-bucket="39"] { --cooldown-duration: 39s; }
+.ai-panel-cooldown[data-cooldown-bucket="40"] { --cooldown-duration: 40s; }
+.ai-panel-cooldown[data-cooldown-bucket="41"] { --cooldown-duration: 41s; }
+.ai-panel-cooldown[data-cooldown-bucket="42"] { --cooldown-duration: 42s; }
+.ai-panel-cooldown[data-cooldown-bucket="43"] { --cooldown-duration: 43s; }
+.ai-panel-cooldown[data-cooldown-bucket="44"] { --cooldown-duration: 44s; }
+.ai-panel-cooldown[data-cooldown-bucket="45"] { --cooldown-duration: 45s; }
+.ai-panel-cooldown[data-cooldown-bucket="46"] { --cooldown-duration: 46s; }
+.ai-panel-cooldown[data-cooldown-bucket="47"] { --cooldown-duration: 47s; }
+.ai-panel-cooldown[data-cooldown-bucket="48"] { --cooldown-duration: 48s; }
+.ai-panel-cooldown[data-cooldown-bucket="49"] { --cooldown-duration: 49s; }
+.ai-panel-cooldown[data-cooldown-bucket="50"] { --cooldown-duration: 50s; }
+.ai-panel-cooldown[data-cooldown-bucket="51"] { --cooldown-duration: 51s; }
+.ai-panel-cooldown[data-cooldown-bucket="52"] { --cooldown-duration: 52s; }
+.ai-panel-cooldown[data-cooldown-bucket="53"] { --cooldown-duration: 53s; }
+.ai-panel-cooldown[data-cooldown-bucket="54"] { --cooldown-duration: 54s; }
+.ai-panel-cooldown[data-cooldown-bucket="55"] { --cooldown-duration: 55s; }
+.ai-panel-cooldown[data-cooldown-bucket="56"] { --cooldown-duration: 56s; }
+.ai-panel-cooldown[data-cooldown-bucket="57"] { --cooldown-duration: 57s; }
+.ai-panel-cooldown[data-cooldown-bucket="58"] { --cooldown-duration: 58s; }
+.ai-panel-cooldown[data-cooldown-bucket="59"] { --cooldown-duration: 59s; }
+.ai-panel-cooldown[data-cooldown-bucket="60"] { --cooldown-duration: 60s; }
+.ai-panel-cooldown[data-cooldown-bucket="overflow"] { --cooldown-duration: 60s; }
+

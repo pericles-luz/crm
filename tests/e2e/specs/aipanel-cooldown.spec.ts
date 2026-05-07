@@ -68,19 +68,29 @@ test.describe("AI panel cooldown UI", () => {
     await expect(cooldownButton(page)).toHaveAttribute("aria-disabled", "true");
     await expect(cooldownLabel(page)).toContainText(/Próxima geração em \d+ s/);
 
-    // The server emits a `--cooldown-duration` custom property that
-    // drives the CSS animation. Read it from the inline style attribute
-    // (which is where the server writes it). Fall back to inspecting the
-    // raw HTML when getPropertyValue returns empty (some Chromium
-    // versions normalize custom-property whitespace differently).
-    const declaredCooldownMs = await cooldownButton(page).evaluate((el) => {
-      const fromStyle = (el as HTMLElement).style.getPropertyValue("--cooldown-duration").trim();
-      if (fromStyle) {
-        return Number(fromStyle.replace("ms", ""));
-      }
-      const attr = el.getAttribute("style") || "";
-      const m = attr.match(/--cooldown-duration:\s*(\d+)ms/);
-      return m ? Number(m[1]) : 0;
+    // SIN-62319: under the F29 CSP (style-src 'self' 'nonce-{N}') the
+    // browser drops every inline style attribute, so the renderer must
+    // not encode the cooldown duration there. The fragment instead emits
+    // `data-cooldown-bucket="N"` (a per-second integer 1..60 or
+    // "overflow"), and a static stylesheet pairs each bucket with a
+    // --cooldown-duration value. Assert (a) no inline style survives,
+    // (b) the bucket attribute is in the expected shape, and (c) the
+    // stylesheet-driven --cooldown-duration on the animated bar is the
+    // ceil-rounded second matching the server's Retry-After.
+    const inlineStyle = await cooldownButton(page).getAttribute("style");
+    expect(inlineStyle === null || inlineStyle === "").toBeTruthy();
+
+    const bucket = await cooldownButton(page).getAttribute("data-cooldown-bucket");
+    expect(bucket).toMatch(/^(?:[1-9]|[1-5]\d|60|overflow)$/);
+
+    const declaredCooldownMs = await cooldownBar(page).evaluate((el) => {
+      const v = getComputedStyle(el as HTMLElement)
+        .getPropertyValue("--cooldown-duration")
+        .trim();
+      const sMatch = v.match(/^([\d.]+)s$/);
+      if (sMatch) return Number(sMatch[1]) * 1000;
+      const msMatch = v.match(/^([\d.]+)ms$/);
+      return msMatch ? Number(msMatch[1]) : 0;
     });
     expect(declaredCooldownMs).toBeGreaterThan(0);
     expect(declaredCooldownMs).toBeLessThanOrEqual(COOLDOWN_MS + 1000);

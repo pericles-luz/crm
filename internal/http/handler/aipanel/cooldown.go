@@ -24,12 +24,13 @@ import (
 	"time"
 )
 
-// fragmentTpl is a small, audited template. CSS custom property syntax
-// `--cooldown-duration:Xms` is what `web/static/css/aipanel.css` consumes for
-// the CSS animation; both the inline style and the visible "N s" caption
-// must reflect the same wall-clock value the middleware returned in
-// Retry-After. We keep the value formatting in Go (not in the template)
-// so SafeText escaping rules stay simple.
+// fragmentTpl is a small, audited template. The countdown bar's
+// duration is encoded as `data-cooldown-bucket="N"` and matched against
+// per-second selectors in `web/static/css/aipanel.css`. SIN-62319: an
+// inline-style attribute would be dropped by the F29 CSP (style-src
+// 'self' 'nonce-{N}'), so we use a data-* attribute that the CSP does
+// not govern. Both the bucket and the visible "N s" caption derive from
+// the same wall-clock value the middleware returned in Retry-After.
 var fragmentTpl = template.Must(template.New("cooldown").Parse(`<button id="ai-panel-regenerate"
         class="ai-panel-cooldown"
         type="button"
@@ -37,20 +38,20 @@ var fragmentTpl = template.Must(template.New("cooldown").Parse(`<button id="ai-p
         aria-disabled="true"
         aria-live="polite"
         data-reason="{{.Reason}}"
-        style="--cooldown-duration:{{.CooldownMs}}ms"
+        data-cooldown-bucket="{{.CooldownBucket}}"
         hx-disable-elt="this">
   <span class="ai-panel-cooldown__bar" aria-hidden="true"></span>
   <span class="ai-panel-cooldown__label">{{.Label}}</span>
 </button>
 `))
 
-// fragmentData holds the values fed into fragmentTpl. CooldownMs is what
-// the CSS animation duration uses; SecondsLabel is a human caption that
-// rounds up so the user never sees "0 s" while the bucket still has lock.
+// fragmentData holds the values fed into fragmentTpl. CooldownBucket is
+// the per-second bucket name ("1".."60" or "overflow") matched by the
+// stylesheet to a `--cooldown-duration` CSS custom property.
 type fragmentData struct {
-	CooldownMs int64
-	Label      string
-	Reason     string
+	CooldownBucket string
+	Label          string
+	Reason         string
 }
 
 // CooldownFragment writes the HTMX fragment to w. retryAfter is the
@@ -86,9 +87,9 @@ func CooldownFragment(w io.Writer, retryAfter time.Duration, reason string) erro
 	}
 
 	return fragmentTpl.Execute(w, fragmentData{
-		CooldownMs: retryAfter.Milliseconds(),
-		Label:      label,
-		Reason:     reason,
+		CooldownBucket: bucketFromMs(retryAfter.Milliseconds()),
+		Label:          label,
+		Reason:         reason,
 	})
 }
 
