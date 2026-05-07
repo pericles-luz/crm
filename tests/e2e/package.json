@@ -1,0 +1,16 @@
+{
+  "name": "crm-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright browser-smoke suite for the CRM (SIN-62318 — AI panel cooldown UI).",
+  "scripts": {
+    "fixture:build": "cd .. && go build -o tests/e2e/.bin/aipanel-e2e-fixture ./cmd/aipanel-e2e-fixture",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:report": "playwright show-report",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
+  }
+}
