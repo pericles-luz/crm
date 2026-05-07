@@ -87,7 +87,7 @@ jobs:
       # ADR 0084 / SIN-62247 — sign the digest before anything else can pull it.
       # SHA-pinned per SIN-62303; bump SHA + trailing version comment together.
       - name: install cosign
-        uses: sigstore/cosign-installer@d7d6e07b78d4bee30dac2f5cdc0ec1b5117a9c7b  # v3.7.0
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3.7.0
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 

@@ -184,6 +184,47 @@ CI-only checks (run against real images / real Dependabot alerts):
 4. A test PR introducing a Go module with a known HIGH CVE causes the
    `security-alerts` workflow to fail.
 
+## Operational notes
+
+### SHA pins must be verified against upstream
+
+Every `uses: owner/repo@<sha>  # vX.Y.Z` line in this repo is SHA-pinned per
+SIN-62303. When you bump (or first add) such a pin, you MUST verify that the
+SHA actually exists in the upstream repository and resolves to the tag you
+typed in the comment. A mismatched SHA fails *twice*:
+
+- **At workflow runtime:** GitHub Actions can't resolve
+  `unable to find version <sha>` and the job exits before the step starts.
+- **In Dependabot:** `latest_commit_for_pinned_ref` calls `git rev-parse`
+  inside a fresh clone, hits `error: no such commit <sha>`, and the entire
+  ecosystem run is reported as `unknown_error` for that dep — taking the rest
+  of that ecosystem's PRs with it on the same job exit. The first
+  symptom we saw was [SIN-62324](/SIN/issues/SIN-62324): a typoed
+  `sigstore/cosign-installer` SHA blocked the whole `github-actions` job and
+  broke `cd-stg` runtime.
+
+To verify a SHA before committing the pin, in any clone with `gh` configured:
+
+```bash
+# 1. Confirm the SHA exists in upstream:
+gh api repos/<owner>/<repo>/commits/<sha> >/dev/null && echo OK
+
+# 2. Confirm the tag in your `# vX.Y.Z` comment dereferences to that SHA
+#    (annotated tags add an indirection through the tag object):
+TAG_SHA=$(gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq '.object.sha')
+TAG_TYPE=$(gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq '.object.type')
+if [ "$TAG_TYPE" = "tag" ]; then
+  COMMIT_SHA=$(gh api repos/<owner>/<repo>/git/tags/$TAG_SHA --jq '.object.sha')
+else
+  COMMIT_SHA=$TAG_SHA
+fi
+echo "$COMMIT_SHA"  # must match the SHA you pinned
+```
+
+The `test_workflow_invariants.sh` script intentionally does *not* call the
+network — keep this verification step in the PR description (or a runbook
+checklist) when bumping action pins.
+
 ## Out of scope (handled in sibling ADRs)
 
 - Container hardening (distroless base, non-root UID, read-only rootfs) is
