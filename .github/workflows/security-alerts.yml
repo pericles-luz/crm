@@ -1,0 +1,49 @@
+# Hard-fail PRs (and emit a daily report) when GitHub Dependabot has any
+# open vulnerability alert with severity >= high.
+# See docs/adr/0084-supply-chain.md (SIN-62247).
+
+name: security-alerts
+
+on:
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "17 6 * * 1-5"   # weekday 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: read
+
+jobs:
+  fail-on-high-or-critical:
+    name: Fail on >= HIGH Dependabot alerts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query Dependabot alerts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Pull all open Dependabot alerts. Requires the workflow's
+          # ${{ secrets.GITHUB_TOKEN }} to have `security_events: read`.
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            --paginate \
+            "/repos/${GITHUB_REPOSITORY}/dependabot/alerts?state=open&per_page=100" \
+            > alerts.json
+
+          # Count alerts at severity high or critical.
+          high_count=$(jq '[.[] | select(.security_advisory.severity == "high" or .security_advisory.severity == "critical")] | length' alerts.json)
+          echo "Open high/critical alerts: ${high_count}"
+
+          if [ "${high_count}" -gt 0 ]; then
+            echo "::error::${high_count} open Dependabot alert(s) at severity >= high. Failing the check."
+            jq -r '.[] | select(.security_advisory.severity == "high" or .security_advisory.severity == "critical")
+                  | "- [\(.security_advisory.severity | ascii_upcase)] \(.security_advisory.summary) — \(.dependency.package.name) (\(.dependency.package.ecosystem)) — \(.html_url)"' \
+              alerts.json
+            exit 1
+          fi
+
+          echo "No open high/critical Dependabot alerts."
