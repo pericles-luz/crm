@@ -150,8 +150,6 @@ func TestBuildCustomDomainHandler_WiredAgainstRedisStub(t *testing.T) {
 	dial := func(_ context.Context, _ string) (customDomainPool, error) {
 		return &fakeCustomDomainPool{}, nil
 	}
-	resolver := func(_ func(string) string) interface{ Resolve() }(nil)
-	_ = resolver
 	redisDial := func(_ context.Context, _ string) (customDomainRedis, error) {
 		return newFakeRedisClient(), nil
 	}
