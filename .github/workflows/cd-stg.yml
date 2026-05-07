@@ -24,6 +24,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # OIDC token for cosign keyless signing — see docs/adr/0084-supply-chain.md
+  # (SIN-62247). Without this, `cosign sign` cannot mint a Fulcio cert.
+  id-token: write
 
 concurrency:
   group: cd-stg
@@ -31,6 +34,9 @@ concurrency:
 
 env:
   IMAGE_REPO: ghcr.io/pericles-luz/crm
+  # Pinned per ADR 0084. Bump the version + the installer SHA together.
+  COSIGN_VERSION: v2.4.1
+  SYFT_VERSION: v1.14.0
 
 jobs:
   deploy-stg:
@@ -77,6 +83,67 @@ jobs:
       - name: compose APP_IMAGE reference
         id: compose-ref
         run: echo "ref=${IMAGE_REPO}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+      # ADR 0084 / SIN-62247 — sign the digest before anything else can pull it.
+      # SHA-pinned per SIN-62303; bump SHA + trailing version comment together.
+      - name: install cosign
+        uses: sigstore/cosign-installer@d7d6e07b78d4bee30dac2f5cdc0ec1b5117a9c7b  # v3.7.0
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: cosign sign image (keyless, GitHub OIDC)
+        env:
+          IMAGE_REF: ${{ steps.compose-ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # --yes skips the interactive transparency-log opt-in prompt.
+          # The signature binds to the digest, never the floating tag.
+          cosign sign --yes "${IMAGE_REF}"
+
+      # SHA-pinned per SIN-62303; bump SHA + trailing version comment together.
+      - name: install syft
+        uses: anchore/sbom-action/download-syft@9f7302141466aa6482940f15371237e9d9f4c34a  # v0.17.7
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - name: generate SBOMs (CycloneDX 1.5 + SPDX 2.3)
+        env:
+          IMAGE_REF: ${{ steps.compose-ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          syft "${IMAGE_REF}" -o "cyclonedx-json@1.5=sbom.cyclonedx.json"
+          syft "${IMAGE_REF}" -o "spdx-json@2.3=sbom.spdx.json"
+
+      - name: cosign attest CycloneDX SBOM
+        env:
+          IMAGE_REF: ${{ steps.compose-ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --predicate sbom.cyclonedx.json \
+            --type cyclonedx \
+            "${IMAGE_REF}"
+
+      - name: cosign attest SPDX SBOM
+        env:
+          IMAGE_REF: ${{ steps.compose-ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${IMAGE_REF}"
+
+      # SHA-pinned per SIN-62303; bump SHA + trailing version comment together.
+      - name: upload SBOMs as workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: sbom-${{ github.event.workflow_run.head_sha }}
+          path: |
+            sbom.cyclonedx.json
+            sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: install ssh client
         run: sudo apt-get update -qq && sudo apt-get install -qq -y openssh-client

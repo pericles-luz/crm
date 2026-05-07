@@ -119,6 +119,54 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
 systemctl enable --now docker
 ```
 
+Install cosign (>= v2.4) — required by `stg-deploy.sh` to verify the cosign
+keyless signature on every image before `compose pull` (ADR 0084 / SIN-62247).
+A missing or out-of-date binary is a hard failure of the deploy gate, not a
+warning.
+
+We **bootstrap by self-verify** rather than by a SHA-256 pin: the cosign
+release artifacts are themselves cosign-signed by the Sigstore release
+identity, so we install the binary, then immediately use it to verify its
+own bytes against the signature published next to the download. This keeps
+the trust anchor in Sigstore (transparency log + Fulcio cert) rather than in
+a SHA-256 hash that would itself need an out-of-band trust anchor.
+
+```bash
+COSIGN_VERSION="2.4.1"
+BASE="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
+
+# 1. Pull the binary and the two adjacent verification files.
+curl -fsSL "${BASE}/cosign-linux-amd64"     -o /tmp/cosign
+curl -fsSL "${BASE}/cosign-linux-amd64.sig" -o /tmp/cosign.sig
+curl -fsSL "${BASE}/cosign-linux-amd64.pem" -o /tmp/cosign.pem
+
+# 2. Install with executable bit so step 3 can run it.
+install -m 0755 /tmp/cosign /usr/local/bin/cosign
+
+# 3. Self-verify: run the just-installed cosign against its own bytes,
+#    binding to the Sigstore release identity. A wrong binary or wrong
+#    signature aborts here with non-zero exit.
+cosign verify-blob \
+  --certificate /tmp/cosign.pem \
+  --signature   /tmp/cosign.sig \
+  --certificate-identity-regexp '^https://github\.com/sigstore/cosign/' \
+  --certificate-oidc-issuer     'https://token.actions.githubusercontent.com' \
+  /tmp/cosign
+
+# 4. Sanity print + cleanup.
+cosign version
+rm -f /tmp/cosign /tmp/cosign.sig /tmp/cosign.pem
+```
+
+If `cosign verify-blob` fails, **do not proceed** — the binary on disk is
+either the wrong release line, a different file than the one Sigstore
+signed, or a tampered copy. Re-pull and re-verify; never `chmod +x` a
+binary whose self-verify failed.
+
+Bumping `COSIGN_VERSION` here MUST also bump `COSIGN_VERSION` in
+`.github/workflows/cd-stg.yml` so the signer and verifier track the same
+release line.
+
 Quick troubleshooting if `apt-get install docker-ce` says
 `Package docker-ce is not available`:
 

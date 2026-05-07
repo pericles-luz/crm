@@ -1,0 +1,48 @@
+# Weekly Dependabot bumps. See docs/adr/0084-supply-chain.md (SIN-62247).
+# Day = Monday so PRs land at the start of the week and we triage them
+# alongside the sprint plan. Timezone is São Paulo to match team hours.
+
+version: 2
+
+updates:
+  # Go modules at the repo root.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 10
+    labels: ["deps", "go"]
+    commit-message:
+      prefix: "deps(go)"
+      include: "scope"
+
+  # GitHub Actions used by every workflow under .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 10
+    labels: ["deps", "ci"]
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+
+  # Docker base images for the production image (Dockerfile at repo root).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 10
+    labels: ["deps", "docker"]
+    commit-message:
+      prefix: "deps(docker)"
+      include: "scope"

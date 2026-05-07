@@ -24,6 +24,22 @@ readonly LAST_IMAGE_FILE="${STG_DIR}/.last-image"
 readonly EXPECTED_REPO="ghcr.io/pericles-luz/crm"
 readonly DIGEST_RE="^${EXPECTED_REPO}@sha256:[0-9a-f]{64}$"
 
+# ADR 0084 / SIN-62247 — cosign keyless verify gate.
+# The image MUST carry a Sigstore signature minted by our GitHub workflow
+# (identity binding) before docker compose pull is allowed to fetch it.
+# Override only via `${COSIGN}=` (test harness) or by editing this script
+# (PR-reviewed break-glass). There is no --skip-verify flag.
+#
+# Identity regex is pinned to the `crm` repository, not to the entire
+# `pericles-luz/*` namespace, so a compromise of any other repo under the
+# same owner cannot mint a signature that satisfies this gate. The literal
+# dots in `github.com` are escaped to remove the parser-differential class
+# where `.` (any char) would match `githubXcom`. Org migration to
+# `Sindireceita` is tracked in SIN-62322.
+: "${COSIGN:=cosign}"
+: "${COSIGN_IDENTITY_REGEXP:=^https://github\.com/pericles-luz/crm/}"
+: "${COSIGN_OIDC_ISSUER:=https://token.actions.githubusercontent.com}"
+
 # Parse the original SSH command if invoked via authorized_keys command="..."
 # constraint, otherwise accept positional arg (manual run).
 if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
@@ -45,6 +61,23 @@ if [[ ! "${NEW_IMAGE}" =~ ${DIGEST_RE} ]]; then
   echo "stg-deploy: must match ${EXPECTED_REPO}@sha256:<64 hex>" >&2
   exit 65
 fi
+
+# ADR 0084 §2 — verify the cosign signature BEFORE compose pull. A missing
+# or invalid signature aborts the deploy; compose is never invoked. This is
+# what catches a registry-side image swap between push and pull.
+if ! command -v "${COSIGN}" >/dev/null 2>&1; then
+  echo "stg-deploy: ${COSIGN} not found in PATH — install cosign >= v2.4 (see docs/deploy/staging.md)" >&2
+  exit 67
+fi
+echo "stg-deploy: cosign verify ${NEW_IMAGE}"
+if ! "${COSIGN}" verify \
+    --certificate-identity-regexp "${COSIGN_IDENTITY_REGEXP}" \
+    --certificate-oidc-issuer "${COSIGN_OIDC_ISSUER}" \
+    "${NEW_IMAGE}" >/dev/null; then
+  echo "stg-deploy: cosign verify FAILED for ${NEW_IMAGE} — refusing to deploy" >&2
+  exit 68
+fi
+echo "stg-deploy: signature OK"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "stg-deploy: ${ENV_FILE} missing — run provisioning checklist first" >&2
