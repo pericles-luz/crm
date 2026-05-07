@@ -102,7 +102,7 @@ jobs:
 
       # SHA-pinned per SIN-62303; bump SHA + trailing version comment together.
       - name: install syft
-        uses: anchore/sbom-action/download-syft@9f7302141466aa6482940f15371237e9d9f4c34a  # v0.17.7
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.17.7
         with:
           syft-version: ${{ env.SYFT_VERSION }}
 
