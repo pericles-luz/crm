@@ -22,9 +22,12 @@
 #      to reason about.
 #
 # Per-resource security headers (X-Content-Type-Options, CSP, Vary,
-# Cache-Control, Content-Disposition) are owned by the Go handler in
+# Cache-Control, Content-Disposition, CORP) are owned by the Go handler in
 # `internal/media/serve` so the policy stays in code-reviewed config and
-# is exercised by tests. Caddy only adds the cookie-strip guards above.
+# is exercised by tests. Caddy adds the cookie-strip guards above plus
+# the shared baseline (HSTS, COOP, COEP, CORP, Referrer-Policy,
+# Permissions-Policy, …) imported from `security-headers.caddy`, so
+# Caddy-served 404s carry the same defense-in-depth as upstream responses.
 #
 # DNS: `static.<primary>` points at the same VPS. TLS is automatic
 # (not on-demand) because the cert is for *our* domain — see ADR 0080
@@ -41,7 +44,12 @@ static.crm.local, static.{$CRM_PRIMARY_DOMAIN:crm.local} {
 	# circumstance, including error pages.
 	header -Set-Cookie
 
-	# 3. Reverse-proxy ONLY the two media routes to app:8080. Anything
+	# 3. Shared defense-in-depth headers (HSTS, COOP, COEP, CORP same-origin,
+	# Referrer-Policy, Permissions-Policy, nosniff, …) — SIN-62330. Imported
+	# after cookie-strip so the baseline applies to every Caddy-served 404 too.
+	import security-headers.caddy
+
+	# 4. Reverse-proxy ONLY the two media routes to app:8080. Anything
 	# else is a 404 served directly by Caddy.
 	@media path /t/*/logo /t/*/m/*
 	handle @media {
