@@ -2,7 +2,10 @@ package validation
 
 import (
 	"context"
+	"net/netip"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Auditor records security-relevant outcomes. The validation use-case fires
@@ -75,3 +78,86 @@ func (SystemClock) Now() time.Time { return time.Now().UTC() }
 type noopAuditor struct{}
 
 func (noopAuditor) Record(context.Context, AuditEvent) {}
+
+// Writer persists one row per Validate / ValidateHostOnly call to the
+// dns_resolution_log table (ADR 0079 §1 step 4 / OWASP A09). It is
+// distinct from Auditor because adapters differ: the Auditor is a
+// fire-and-forget log sink, while the Writer is a transactional store
+// that must keep tenant_id, decision, and reason in a queryable column
+// for IR forensics.
+//
+// The Validator calls Write exactly once per terminal path (success,
+// block, or error). On Writer failure the validator MUST NOT fail the
+// caller — losing one audit row is preferable to denying a legitimate
+// validation. Adapters log internal errors and return nil on the hot
+// path; we still let Write return an error so test doubles can assert
+// the call shape without swallowing scan bugs.
+type Writer interface {
+	Write(ctx context.Context, entry LogEntry) error
+}
+
+// LogEntry is the canonical row shape persisted to dns_resolution_log.
+// Field semantics:
+//
+//   - TenantID: the tenant initiating the validation. Zero (uuid.Nil)
+//     when the call originates outside a tenant request — for example
+//     a startup self-test. Adapters MUST persist NULL on uuid.Nil so
+//     forensics can distinguish anonymous attempts from a known tenant.
+//   - Host: the hostname under validation, normalized to lowercase.
+//   - PinnedIP: the resolved IP we pinned on success. Zero (Addr{}) on
+//     blocked-SSRF and on every error path. Adapters MUST persist NULL
+//     on a zero Addr — the blocked-SSRF case INTENTIONALLY discards the
+//     attacker-chosen IP so it never lands in our log pipeline.
+//   - VerifiedWithDNSSEC: only meaningful when PinnedIP.IsValid(). On
+//     blocked / error rows it is false by convention.
+//   - Decision: controlled vocabulary; one of DecisionAllow,
+//     DecisionBlock, or DecisionError. Adapters store it verbatim.
+//   - Reason: short controlled-vocabulary string explaining the decision
+//     (ReasonOK, ReasonPrivateIP, ReasonTokenMismatch, etc.). Mirrors the
+//     Auditor event vocabulary so the two stores can be cross-checked.
+//   - Phase: PhaseValidate or PhaseHostOnly — distinguishes Verify
+//     (full check) from the pre-flight at Enroll time.
+//   - At: the wall-clock timestamp the validator generated the row,
+//     pulled from the same Clock the auditor sees.
+type LogEntry struct {
+	TenantID           uuid.UUID
+	Host               string
+	PinnedIP           netip.Addr
+	VerifiedWithDNSSEC bool
+	Decision           string
+	Reason             string
+	Phase              string
+	At                 time.Time
+}
+
+// Decision values stored in dns_resolution_log.decision.
+const (
+	DecisionAllow = "allow"
+	DecisionBlock = "block"
+	DecisionError = "error"
+)
+
+// Reason vocabulary stored in dns_resolution_log.reason. Mirrors the
+// Auditor event vocabulary so an IR engineer can join logs by reason
+// without translating between two strings tables.
+const (
+	ReasonOK            = "ok"
+	ReasonPrivateIP     = "private_ip"
+	ReasonTokenMismatch = "token_mismatch"
+	ReasonNoAddress     = "no_address"
+	ReasonResolverError = "resolver_error"
+	ReasonEmptyInput    = "empty_input"
+)
+
+// Phase values stored in dns_resolution_log.phase.
+const (
+	PhaseValidate = "validate"
+	PhaseHostOnly = "host_only"
+)
+
+// noopWriter is the safe fallback when callers do not configure a Writer.
+// Same rationale as noopAuditor: a missing Writer must not strand the hot
+// path on a nil-pointer panic.
+type noopWriter struct{}
+
+func (noopWriter) Write(context.Context, LogEntry) error { return nil }

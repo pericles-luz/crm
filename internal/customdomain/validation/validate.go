@@ -24,7 +24,26 @@ const txtSubdomain = "_crm-verify."
 type Validator struct {
 	resolver dnsresolver.Resolver
 	auditor  Auditor
+	writer   Writer
 	clock    Clock
+}
+
+// Option mutates a Validator at construction time. Used to plug in
+// optional collaborators (currently only Writer) without breaking the
+// existing positional New signature.
+type Option func(*Validator)
+
+// WithWriter plugs a dns_resolution_log Writer into the validator.
+// Validation paths emit one entry per terminal outcome (success, block,
+// or error). Writer failures are logged but never bubble up — losing a
+// single audit row is preferable to denying a legitimate validation.
+func WithWriter(w Writer) Option {
+	return func(v *Validator) {
+		if w == nil {
+			return
+		}
+		v.writer = w
+	}
 }
 
 // New builds a Validator. Passing a nil Auditor is allowed and uses a
@@ -35,11 +54,36 @@ type Validator struct {
 //
 // We do not panic at construction time so this can be called from main
 // before adapters are wired (e.g. in graceful-shutdown ordering tests).
-func New(resolver dnsresolver.Resolver, auditor Auditor, clock Clock) *Validator {
+//
+// The variadic opts argument is the forward-compatible seam for adding
+// a Writer (or future collaborators) without changing the positional
+// signature: tests and existing wire-up calling New(resolver, auditor,
+// clock) still compile and behave identically.
+func New(resolver dnsresolver.Resolver, auditor Auditor, clock Clock, opts ...Option) *Validator {
 	if auditor == nil {
 		auditor = noopAuditor{}
 	}
-	return &Validator{resolver: resolver, auditor: auditor, clock: clock}
+	v := &Validator{
+		resolver: resolver,
+		auditor:  auditor,
+		writer:   noopWriter{},
+		clock:    clock,
+	}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
+}
+
+// emit writes one LogEntry, swallowing the adapter's error. The Auditor
+// already records every audit event; the Writer outage is best-effort.
+// Callers MUST NOT rely on the return value for control flow — it exists
+// only for cleaner unit-test assertions.
+func (v *Validator) emit(ctx context.Context, e LogEntry) {
+	if v.writer == nil {
+		return
+	}
+	_ = v.writer.Write(ctx, e)
 }
 
 // Validate is the one entry point. The contract is:
@@ -64,23 +108,28 @@ func (v *Validator) Validate(ctx context.Context, host, expectedToken string) (R
 	host = strings.TrimSpace(strings.ToLower(host))
 	expectedToken = strings.TrimSpace(expectedToken)
 	now := v.clock.Now()
+	tenantID := TenantIDFromContext(ctx)
 
 	if host == "" {
 		v.auditor.Record(ctx, AuditEvent{Event: EventEmptyInput, Host: host, At: now, Detail: map[string]string{"reason": "host"}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonEmptyInput, Phase: PhaseValidate, At: now})
 		return Result{}, ErrEmptyHost
 	}
 	if expectedToken == "" {
 		v.auditor.Record(ctx, AuditEvent{Event: EventEmptyInput, Host: host, At: now, Detail: map[string]string{"reason": "token"}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonEmptyInput, Phase: PhaseValidate, At: now})
 		return Result{}, ErrEmptyToken
 	}
 
 	answers, err := v.resolver.LookupIP(ctx, host)
 	if err != nil {
 		v.auditor.Record(ctx, AuditEvent{Event: EventResolverError, Host: host, At: now, Detail: map[string]string{"phase": "ip", "err": err.Error()}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonResolverError, Phase: PhaseValidate, At: now})
 		return Result{}, fmt.Errorf("validation: lookup IP for %q: %w", host, err)
 	}
 	if len(answers) == 0 {
 		v.auditor.Record(ctx, AuditEvent{Event: EventNoAddress, Host: host, At: now})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonNoAddress, Phase: PhaseValidate, At: now})
 		return Result{}, ErrNoAddress
 	}
 
@@ -94,6 +143,9 @@ func (v *Validator) Validate(ctx context.Context, host, expectedToken string) (R
 	for _, a := range answers {
 		if isBlocked(a.IP) {
 			v.auditor.Record(ctx, AuditEvent{Event: EventBlockedSSRF, Host: host, At: now, Detail: map[string]string{"answers": fmt.Sprintf("%d", len(answers))}})
+			// PinnedIP is intentionally zero — we MUST NOT persist the
+			// attacker-chosen address in the log pipeline.
+			v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionBlock, Reason: ReasonPrivateIP, Phase: PhaseValidate, At: now})
 			return Result{}, ErrPrivateIP
 		}
 		// AND-style: if any answer is unsigned, the verified-with-DNSSEC
@@ -112,10 +164,12 @@ func (v *Validator) Validate(ctx context.Context, host, expectedToken string) (R
 	txts, err := v.resolver.LookupTXT(ctx, txtSubdomain+host)
 	if err != nil {
 		v.auditor.Record(ctx, AuditEvent{Event: EventResolverError, Host: host, At: now, Detail: map[string]string{"phase": "txt", "err": err.Error()}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonResolverError, Phase: PhaseValidate, At: now})
 		return Result{}, fmt.Errorf("validation: lookup TXT for %q: %w", txtSubdomain+host, err)
 	}
 	if !containsToken(txts, expectedToken) {
 		v.auditor.Record(ctx, AuditEvent{Event: EventTokenMismatch, Host: host, At: now, Detail: map[string]string{"records": fmt.Sprintf("%d", len(txts))}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionBlock, Reason: ReasonTokenMismatch, Phase: PhaseValidate, At: now})
 		return Result{}, ErrTokenMismatch
 	}
 
@@ -132,6 +186,16 @@ func (v *Validator) Validate(ctx context.Context, host, expectedToken string) (R
 			"ip":     res.IP.String(),
 			"dnssec": fmt.Sprintf("%t", res.VerifiedWithDNSSEC),
 		},
+	})
+	v.emit(ctx, LogEntry{
+		TenantID:           tenantID,
+		Host:               host,
+		PinnedIP:           res.IP,
+		VerifiedWithDNSSEC: res.VerifiedWithDNSSEC,
+		Decision:           DecisionAllow,
+		Reason:             ReasonOK,
+		Phase:              PhaseValidate,
+		At:                 now,
 	})
 	return res, nil
 }
@@ -154,27 +218,36 @@ func (v *Validator) Validate(ctx context.Context, host, expectedToken string) (R
 func (v *Validator) ValidateHostOnly(ctx context.Context, host string) error {
 	host = strings.TrimSpace(strings.ToLower(host))
 	now := v.clock.Now()
+	tenantID := TenantIDFromContext(ctx)
 
 	if host == "" {
 		v.auditor.Record(ctx, AuditEvent{Event: EventEmptyInput, Host: host, At: now, Detail: map[string]string{"reason": "host", "phase": "host_only"}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonEmptyInput, Phase: PhaseHostOnly, At: now})
 		return ErrEmptyHost
 	}
 	answers, err := v.resolver.LookupIP(ctx, host)
 	if err != nil {
 		v.auditor.Record(ctx, AuditEvent{Event: EventResolverError, Host: host, At: now, Detail: map[string]string{"phase": "host_only", "err": err.Error()}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonResolverError, Phase: PhaseHostOnly, At: now})
 		return fmt.Errorf("validation: lookup IP for %q: %w", host, err)
 	}
 	if len(answers) == 0 {
 		v.auditor.Record(ctx, AuditEvent{Event: EventNoAddress, Host: host, At: now, Detail: map[string]string{"phase": "host_only"}})
+		v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionError, Reason: ReasonNoAddress, Phase: PhaseHostOnly, At: now})
 		return ErrNoAddress
 	}
 	for _, a := range answers {
 		if isBlocked(a.IP) {
 			v.auditor.Record(ctx, AuditEvent{Event: EventBlockedSSRF, Host: host, At: now, Detail: map[string]string{"phase": "host_only", "answers": fmt.Sprintf("%d", len(answers))}})
+			v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionBlock, Reason: ReasonPrivateIP, Phase: PhaseHostOnly, At: now})
 			return ErrPrivateIP
 		}
 	}
 	v.auditor.Record(ctx, AuditEvent{Event: EventValidatedOK, Host: host, At: now, Detail: map[string]string{"phase": "host_only"}})
+	// Pre-flight does not pin an IP (the Verify path does). We persist
+	// allow/ok with a zero PinnedIP so reviewers can still see that the
+	// pre-flight passed.
+	v.emit(ctx, LogEntry{TenantID: tenantID, Host: host, Decision: DecisionAllow, Reason: ReasonOK, Phase: PhaseHostOnly, At: now})
 	return nil
 }
 

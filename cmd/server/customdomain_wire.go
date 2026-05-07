@@ -191,7 +191,19 @@ func buildCustomDomainHandlerWithDeps(ctx context.Context, getenv func(string) s
 	// SIN-62313: wire the SIN-62242 validator + miekg adapter so the
 	// `Verificar agora` path executes the real DNS-only ownership
 	// validation (TXT proof + IP allowlist + DNSSEC observability).
-	validator := validation.New(resolverFactory(getenv), validationAudit{logger: slog.Default()}, validation.SystemClock{})
+	//
+	// SIN-62333: also wire the dns_resolution_log writer so every
+	// Validate / ValidateHostOnly call lands one row keyed on
+	// (tenant_id, host, decision, reason). Without this, a blocked
+	// SSRF attempt is observable only in slog and IR cannot
+	// reconstruct the timeline (OWASP A09).
+	dnsLogStore := pgstore.NewDNSResolutionLogStore(pool)
+	validator := validation.New(
+		resolverFactory(getenv),
+		validationAudit{logger: slog.Default()},
+		validation.SystemClock{},
+		validation.WithWriter(dnsLogStore),
+	)
 	uc, err := management.New(management.Config{
 		Store:     store,
 		Gate:      gate,
@@ -382,7 +394,7 @@ func (a validationAudit) Record(ctx context.Context, ev validation.AuditEvent) {
 type hostValidatorAdapter struct{ v *validation.Validator }
 
 func (h hostValidatorAdapter) Validate(ctx context.Context, host string) error {
-	if err := h.v.ValidateHostOnly(ctx, host); err != nil {
+	if err := h.v.ValidateHostOnly(propagateTenantID(ctx), host); err != nil {
 		switch {
 		case errors.Is(err, validation.ErrPrivateIP):
 			return fmt.Errorf("%w: %w", management.ErrPrivateIP, err)
@@ -407,14 +419,15 @@ func (h hostValidatorAdapter) Validate(ctx context.Context, host string) error {
 // case — without the wrap, classifyValidationError falls through to
 // ReasonDNSResolutionFailed and the UI shows the wrong PT-BR copy.
 //
-// LogID is currently nil because the validation use-case does not yet
-// persist a dns_resolution_log row; that wiring lives behind a separate
-// store port and is tracked in the F44 follow-up. The DNSSEC flag still
-// flows through so the badge renders correctly.
+// LogID is currently nil. SIN-62333 wires the dns_resolution_log
+// writer (validation.Writer / pgstore.DNSResolutionLogStore) so a row
+// IS persisted on every Validate call now, but plumbing the inserted
+// row id back through DNSCheckResult.LogID is a separate ticket. The
+// DNSSEC flag still flows through so the badge renders correctly.
 type dnsCheckerAdapter struct{ v *validation.Validator }
 
 func (d dnsCheckerAdapter) Check(ctx context.Context, host, expectedToken string) (management.DNSCheckResult, error) {
-	res, err := d.v.Validate(ctx, host, expectedToken)
+	res, err := d.v.Validate(propagateTenantID(ctx), host, expectedToken)
 	if err != nil {
 		switch {
 		case errors.Is(err, validation.ErrTokenMismatch):
@@ -444,6 +457,20 @@ func (passWindowCounter) CountAndRecord(_ context.Context, _ uuid.UUID, _ enroll
 type zeroBreaker struct{}
 
 func (zeroBreaker) IsOpen(context.Context, uuid.UUID, time.Time) (bool, error) { return false, nil }
+
+// propagateTenantID translates the tenant id stored on the request
+// context by `wrapWithDevTenantHeader` (or the future production auth
+// middleware) into the validation package's own context key. The
+// validation use-case then writes that id into every dns_resolution_log
+// row it persists. uuid.Nil is left alone so anonymous calls land as
+// SQL NULL.
+func propagateTenantID(ctx context.Context) context.Context {
+	tenantID := customdomainhttp.TenantIDFromContext(ctx)
+	if tenantID == uuid.Nil {
+		return ctx
+	}
+	return validation.WithTenantID(ctx, tenantID)
+}
 
 // nopAudit / nopSlack satisfy slugreservation's required ports without
 // emitting anything; the management UI never invokes the master-override
