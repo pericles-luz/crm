@@ -54,8 +54,12 @@ pipeline rather than parallel to it.
   key is stored anywhere — Sigstore Fulcio mints a short-lived certificate
   bound to the workflow identity for the duration of the run.
 - Identity binding (verifier side): the signer certificate's SAN must match
-  `^https://github.com/pericles-luz/.+` and the OIDC issuer must be
-  `https://token.actions.githubusercontent.com`. Anything else is rejected.
+  `^https://github\.com/pericles-luz/crm/` (literal dots escaped, scoped to
+  the `crm` repo specifically) and the OIDC issuer must be
+  `https://token.actions.githubusercontent.com`. Anything else is rejected,
+  including signatures minted by other repos under the same owner.
+  Org migration to `Sindireceita` is tracked in
+  [SIN-62322](/SIN/issues/SIN-62322).
 
 ### 2. Deploy verify gate
 
@@ -110,7 +114,9 @@ Positive:
   to pull.
 - An attacker who steals our registry credentials still cannot push a signed
   image, because cosign keyless requires the GitHub OIDC token of an identity
-  matching `github.com/pericles-luz/.+`.
+  matching `github\.com/pericles-luz/crm/` — and a compromise of any
+  *other* repo under the same owner cannot mint a signature that satisfies
+  the gate either.
 - Every prod-bound image has a CycloneDX + SPDX SBOM tied to its digest,
   satisfying LGPD audit requests ("which version of which library was running
   on date X").

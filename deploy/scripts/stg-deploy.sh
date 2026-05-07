@@ -29,8 +29,15 @@ readonly DIGEST_RE="^${EXPECTED_REPO}@sha256:[0-9a-f]{64}$"
 # (identity binding) before docker compose pull is allowed to fetch it.
 # Override only via `${COSIGN}=` (test harness) or by editing this script
 # (PR-reviewed break-glass). There is no --skip-verify flag.
+#
+# Identity regex is pinned to the `crm` repository, not to the entire
+# `pericles-luz/*` namespace, so a compromise of any other repo under the
+# same owner cannot mint a signature that satisfies this gate. The literal
+# dots in `github.com` are escaped to remove the parser-differential class
+# where `.` (any char) would match `githubXcom`. Org migration to
+# `Sindireceita` is tracked in SIN-62322.
 : "${COSIGN:=cosign}"
-: "${COSIGN_IDENTITY_REGEXP:=^https://github.com/pericles-luz/.+}"
+: "${COSIGN_IDENTITY_REGEXP:=^https://github\.com/pericles-luz/crm/}"
 : "${COSIGN_OIDC_ISSUER:=https://token.actions.githubusercontent.com}"
 
 # Parse the original SSH command if invoked via authorized_keys command="..."

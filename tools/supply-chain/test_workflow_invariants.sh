@@ -51,7 +51,7 @@ if require_file "${DEPLOY}"; then
   contains "${DEPLOY}" "--certificate-identity-regexp"                       "cosign identity binding"
   contains "${DEPLOY}" "--certificate-oidc-issuer"                           "cosign issuer binding"
   contains "${DEPLOY}" "token.actions.githubusercontent.com"                 "OIDC issuer is GitHub Actions"
-  contains "${DEPLOY}" "https://github.com/pericles-luz/.+"                  "identity regex pinned to repo owner"
+  contains "${DEPLOY}" 'https://github\.com/pericles-luz/crm/'               "identity regex pinned to crm repo (escaped dots)"
 fi
 
 echo "==> security-alerts.yml invariants"
