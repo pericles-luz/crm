@@ -1,0 +1,58 @@
+# Caddy 2 config for the cookieless static origin (SIN-62257, F49).
+#
+# This file MUST be imported alongside the main Caddyfile when serving
+# tenant assets. It defines the dedicated `static.<primary>` vhost that
+# isolates tenant media from the cookied app origin and gives CSP a
+# coherent surface to lock down.
+#
+# Defense-in-depth contract (mirrors SIN-62226 decisions §7):
+#
+#   1. Inbound `Cookie` headers are stripped BEFORE the request reaches
+#      `app:8080`. Even if a browser sends `__Host-sess=…`, the backend
+#      `internal/media/serve` handler never sees it. This is a hard
+#      guarantee independent of the handler's "no auth claim" policy.
+#
+#   2. Outbound `Set-Cookie` headers are stripped from every response,
+#      so a misbehaving handler or framework default can never leak a
+#      cookie out of the static origin.
+#
+#   3. Only the two media routes are routed upstream; everything else
+#      is a 404 that never crosses the network. This shrinks the path
+#      surface that any future security policy (CSP, CORP, COEP) needs
+#      to reason about.
+#
+# Per-resource security headers (X-Content-Type-Options, CSP, Vary,
+# Cache-Control, Content-Disposition) are owned by the Go handler in
+# `internal/media/serve` so the policy stays in code-reviewed config and
+# is exercised by tests. Caddy only adds the cookie-strip guards above.
+#
+# DNS: `static.<primary>` points at the same VPS. TLS is automatic
+# (not on-demand) because the cert is for *our* domain — see ADR 0080
+# §7 for why this is preferable to per-tenant on-demand certs for
+# assets.
+
+static.crm.local, static.{$CRM_PRIMARY_DOMAIN:crm.local} {
+	# 1. Strip session cookies inbound — defense-in-depth alongside the
+	# handler's contract that it never reads cookies.
+	request_header -Cookie
+
+	# 2. Strip any Set-Cookie an upstream might emit before it reaches
+	# the wire. The static origin must NEVER set a cookie under any
+	# circumstance, including error pages.
+	header -Set-Cookie
+
+	# 3. Reverse-proxy ONLY the two media routes to app:8080. Anything
+	# else is a 404 served directly by Caddy.
+	@media path /t/*/logo /t/*/m/*
+	handle @media {
+		reverse_proxy app:8080
+	}
+
+	handle {
+		respond 404
+	}
+
+	# Compression is safe on the static origin: there are no secrets in
+	# the responses and no cookies to leak (CRIME/BREACH require both).
+	encode zstd gzip
+}
