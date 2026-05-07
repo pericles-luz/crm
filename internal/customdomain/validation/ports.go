@@ -141,12 +141,12 @@ const (
 // Auditor event vocabulary so an IR engineer can join logs by reason
 // without translating between two strings tables.
 const (
-	ReasonOK             = "ok"
-	ReasonPrivateIP      = "private_ip"
-	ReasonTokenMismatch  = "token_mismatch"
-	ReasonNoAddress      = "no_address"
-	ReasonResolverError  = "resolver_error"
-	ReasonEmptyInput     = "empty_input"
+	ReasonOK            = "ok"
+	ReasonPrivateIP     = "private_ip"
+	ReasonTokenMismatch = "token_mismatch"
+	ReasonNoAddress     = "no_address"
+	ReasonResolverError = "resolver_error"
+	ReasonEmptyInput    = "empty_input"
 )
 
 // Phase values stored in dns_resolution_log.phase.
