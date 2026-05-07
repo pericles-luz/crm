@@ -38,6 +38,28 @@ func TestMediaHeaders_SetsBaselineOnInnerHandler(t *testing.T) {
 	}
 }
 
+// TestMediaHeaders_SetsCORPSameOrigin is the SIN-62330 unit-level
+// regression for the middleware itself: CORP same-origin must be applied
+// on every response.
+func TestMediaHeaders_SetsCORPSameOrigin(t *testing.T) {
+	t.Parallel()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(serve.MediaHeaders(inner))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/anything")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer res.Body.Close()
+
+	if got := res.Header.Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+		t.Fatalf("CORP = %q, want same-origin", got)
+	}
+}
+
 func TestMediaHeaders_HandlerCanOverrideCacheControl(t *testing.T) {
 	t.Parallel()
 	// Middleware must NOT clobber Cache-Control values set later by the

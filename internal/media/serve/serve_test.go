@@ -701,3 +701,61 @@ func TestServe_ContentLengthZeroOmitted(t *testing.T) {
 		t.Fatalf("body length = %d, want 17", len(body))
 	}
 }
+
+// TestServe_CORPSameOriginEverywhere is the SIN-62330 regression: every
+// response from the static origin — 200 and 404, logo and content-addressed
+// — must carry Cross-Origin-Resource-Policy: same-origin so a cross-origin
+// embedder cannot hot-link tenant assets and read pixel data via canvas.
+func TestServe_CORPSameOriginEverywhere(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	blob := newMemBlob()
+
+	store.putLogo(serve.Media{
+		TenantID:    tenantA(),
+		Format:      upload.FormatPNG,
+		StoragePath: "media/a/logo.png",
+		SizeBytes:   1,
+	})
+	blob.put("media/a/logo.png", []byte("x"))
+
+	store.putMedia(serve.Media{
+		TenantID:    tenantA(),
+		Hash:        validHash,
+		Format:      upload.FormatPNG,
+		StoragePath: "media/a/" + validHash + ".png",
+		SizeBytes:   1,
+	})
+	blob.put("media/a/"+validHash+".png", []byte("y"))
+
+	srv := newServer(t, store, blob)
+
+	cases := []struct {
+		name       string
+		path       string
+		wantStatus int
+	}{
+		{"200 logo", "/t/" + tenantA().String() + "/logo", http.StatusOK},
+		{"200 content-addressed", "/t/" + tenantA().String() + "/m/" + validHash, http.StatusOK},
+		{"404 logo", "/t/" + tenantB().String() + "/logo", http.StatusNotFound},
+		{"404 cross-tenant", "/t/" + tenantB().String() + "/m/" + validHash, http.StatusNotFound},
+		{"404 invalid hash", "/t/" + tenantA().String() + "/m/short", http.StatusNotFound},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			res, err := http.Get(srv.URL + c.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", c.path, err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != c.wantStatus {
+				t.Fatalf("status = %d, want %d", res.StatusCode, c.wantStatus)
+			}
+			if got := res.Header.Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+				t.Fatalf("CORP = %q, want same-origin", got)
+			}
+		})
+	}
+}
