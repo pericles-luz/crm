@@ -1,0 +1,13 @@
+# Fixture: catch-all Caddyfile but NO unbound sidecar.
+# This is the F44 regression the lint must catch — exit 1.
+name: missing-unbound-fixture
+
+services:
+  app:
+    image: alpine:3.20
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./caddy:/etc/caddy:ro
+    depends_on: [app]

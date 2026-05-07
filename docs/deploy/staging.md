@@ -23,6 +23,7 @@ inputs:
 | ----------------------- | ----------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `docker-smoke` (SIN-62301) | `.github/workflows/docker-smoke.yml`      | `Dockerfile`, `.dockerignore`, `go.mod`, `go.sum`          | Builder-image vs `go.mod` toolchain drift — fails fast at `go mod download` if the pinned base image cannot satisfy the source tree's `go`/`toolchain` directives. |
 | `govulncheck` (SIN-62298) | `.github/workflows/govulncheck.yml`       | every PR                                                  | Reachable stdlib/dep CVEs (call-graph, source-mode).                          |
+| `compose-unbound-parity` (SIN-62332) | `.github/workflows/compose-unbound-parity.yml` | `deploy/compose/**`, `deploy/caddy/**`, `infra/caddy/**`, the lint script and its fixtures | Any compose with a Caddyfile `on_demand_tls` catch-all that ships without the Unbound sidecar + `dns: ["unbound"]` pin (F44 / ADR 0079 §2 deploy gate). |
 
 The gates are **complementary, not duplicates**: `govulncheck` runs against the
 source tree's import graph; `docker-smoke` runs against the build sandbox the
@@ -66,6 +67,71 @@ Image policy: every image in `compose.stg.yml`, including the app, is consumed
 by SHA256 digest, never by floating tag. `grep -E ':(latest|alpine)$'
 deploy/compose/compose.stg.yml` MUST return zero matches; CI fails the build
 if it ever does.
+
+## Custom-domain catch-all (F44 / Unbound) deploy gate
+
+Before any compose published to staging or prod can serve a `:443` catch-all
+for tenant custom domains (Caddyfile `on_demand_tls` block), it MUST also
+ship the Unbound sidecar AND pin Caddy's container DNS to it. Skipping
+either half re-opens the F44 attack class — DNS rebinding via the ACME
+HTTP-01 challenge resolves a tenant-controlled name to `127.0.0.1` /
+`169.254.169.254` / a private VPC range, and Caddy hands the issuance token
+to the attacker (originally raised in the SIN-62226 umbrella, re-validated
+in SIN-62328 § R-A).
+
+**Required parity in every `compose*.yml` that mounts a Caddyfile with
+`on_demand_tls`:**
+
+1. A top-level service named `unbound`, mounting `infra/caddy/unbound.conf`
+   read-only at `/opt/unbound/etc/unbound/a-records.conf`. The blocklist in
+   that file mirrors `internal/customdomain/validation/blocklist.go` (drift
+   here = security drift).
+2. The `caddy` service has `dns: ["unbound"]` so the container's
+   `/etc/resolv.conf` points at the sidecar. This is what catches HTTP-01
+   challenge name resolution — Caddy's own `tls.resolvers` block only
+   covers DNS-01 plugin lookups.
+3. `caddy.depends_on` includes `unbound: { condition: service_started }`
+   so issuance never fires before the sidecar is up.
+
+`deploy/compose/compose.yml` and `deploy/compose/compose.stg.yml` both ship
+the sidecar today even though only the local-dev compose has the catch-all
+turned on — staging keeps the parity wired so flipping
+`on_demand_tls` in `Caddyfile.stg` later cannot, by itself, regress F44.
+
+**CI gate:** `.github/workflows/compose-unbound-parity.yml` runs
+`scripts/check-compose-unbound-parity.sh` over every `deploy/compose/compose*.yml`
+on each PR. The script identifies the active Caddyfile per compose
+(`caddy.command --config …` falling back to `/etc/caddy/Caddyfile`),
+reads it from `deploy/caddy/`, and fails the workflow if the Caddyfile
+contains an uncommented `on_demand_tls` directive while the compose lacks
+either piece of parity. A fixture-driven self-test (`scripts/check-compose-unbound-parity.test.sh`,
+fixtures under `scripts/testdata/compose-unbound-parity/`) ensures the
+lint itself does not silently rot. Expect both jobs to be green before
+merging any change to `deploy/compose/**`, `deploy/caddy/**`, or
+`infra/caddy/**`.
+
+**Manual smoke test (post-deploy):** confirm Unbound refuses
+private/loopback answers from inside the compose network — this is the
+direct mitigation for F44, so it should be re-run any time the sidecar
+config changes.
+
+```bash
+COMPOSE_ARGS="--env-file /opt/crm/stg/.env.stg -f /opt/crm/stg/compose.stg.yml"
+
+# Spin up a throwaway tool container on the same network and ask Unbound
+# to resolve a host that, hypothetically, points at a private IP. The
+# `private-address` + `deny-answer-address` blocks in unbound.conf must
+# rewrite the answer to NXDOMAIN/REFUSED — anything else is a regression.
+sudo -u crm-deploy docker compose ${COMPOSE_ARGS} run --rm \
+  --no-deps --entrypoint sh caddy \
+  -c 'apk add -q drill && drill @unbound -p 5353 localhost'
+# Expect: ;; ->>HEADER<<- opcode: QUERY, rcode: NXDOMAIN  (or REFUSED)
+```
+
+Re-running this from the runbook lets you verify staging parity even
+before flipping `on_demand_tls.ask` on `Caddyfile.stg`. If the answer is
+`NOERROR` with `127.0.0.1` in the answer section, do NOT proceed with a
+catch-all flip — the sidecar is misconfigured.
 
 ## Provisioning a fresh staging VPS (target: < 1h)
 
@@ -257,8 +323,11 @@ STG_HOST="REPLACE_STG_HOST"
 scp deploy/compose/compose.stg.yml deploy/scripts/stg-deploy.sh \
     "root@${STG_HOST}:/tmp/"
 # Caddy reads its config from /etc/caddy/, mounted from /opt/crm/stg/caddy/.
-# Send the two files Caddy needs at startup:
+# Send the three files Caddy + Unbound need at startup:
+#   - Caddyfile.stg, security-headers.caddy        — Caddy
+#   - unbound.conf                                 — Unbound sidecar (SIN-62332)
 scp deploy/caddy/Caddyfile.stg deploy/caddy/security-headers.caddy \
+    infra/caddy/unbound.conf \
     "root@${STG_HOST}:/tmp/"
 ```
 

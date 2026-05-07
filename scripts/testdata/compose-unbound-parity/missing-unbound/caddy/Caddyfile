@@ -1,0 +1,11 @@
+# Fixture: catch-all Caddyfile (parity required by lint).
+{
+	on_demand_tls {
+		ask http://app:8081/internal/tls/ask
+	}
+}
+
+:443 {
+	tls { on_demand }
+	reverse_proxy app:8080
+}

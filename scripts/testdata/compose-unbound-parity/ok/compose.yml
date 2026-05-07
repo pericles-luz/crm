@@ -1,0 +1,21 @@
+# Fixture: catch-all Caddyfile + matching Unbound sidecar + dns pin.
+# The lint must exit 0.
+name: ok-fixture
+
+services:
+  app:
+    image: alpine:3.20
+
+  unbound:
+    image: mvance/unbound:1.22.0
+    volumes:
+      - ./caddy/unbound.conf:/opt/unbound/etc/unbound/a-records.conf:ro
+
+  caddy:
+    image: caddy:2-alpine
+    dns: ["unbound"]
+    volumes:
+      - ./caddy:/etc/caddy:ro
+    depends_on:
+      app: { condition: service_started }
+      unbound: { condition: service_started }
