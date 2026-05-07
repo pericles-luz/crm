@@ -27,12 +27,31 @@ jobs:
           set -euo pipefail
 
           # Pull all open Dependabot alerts. Requires the workflow's
-          # ${{ secrets.GITHUB_TOKEN }} to have `security_events: read`.
+          # ${{ secrets.GITHUB_TOKEN }} to have `security_events: read` AND
+          # Dependabot alerts to be enabled under Settings > Code security
+          # and analysis. The latter is a per-repo toggle; without it the
+          # API returns 403 ("Dependabot alerts are disabled for this
+          # repository.") and we fail-closed with an actionable message
+          # rather than silently passing.
+          set +e
           gh api \
             -H "Accept: application/vnd.github+json" \
             --paginate \
             "/repos/${GITHUB_REPOSITORY}/dependabot/alerts?state=open&per_page=100" \
-            > alerts.json
+            > alerts.json 2> alerts.err
+          status=$?
+          set -e
+
+          if [ "${status}" -ne 0 ]; then
+            if grep -q "Dependabot alerts are disabled" alerts.err; then
+              cat alerts.err >&2
+              echo "::error::Dependabot alerts are disabled for ${GITHUB_REPOSITORY}. Enable them under Settings → Code security and analysis (ADR 0084 §4 — required for the supply-chain baseline)."
+              exit 1
+            fi
+            cat alerts.err >&2
+            echo "::error::Could not list Dependabot alerts (gh api exit ${status}). Check token permissions and API status."
+            exit 1
+          fi
 
           # Count alerts at severity high or critical.
           high_count=$(jq '[.[] | select(.security_advisory.severity == "high" or .security_advisory.severity == "critical")] | length' alerts.json)

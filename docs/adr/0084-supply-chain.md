@@ -96,6 +96,10 @@ pipeline rather than parallel to it.
   vulnerability alerts API on every PR and on a daily weekday cron. **Any
   open alert with severity `high` or `critical` fails the workflow.** This is
   a hard gate, not a comment-only signal.
+- **Repo prerequisite:** Dependabot alerts must be enabled under
+  Settings → Code security and analysis. Without it, the API returns 403
+  and the gate fails-closed with an actionable error pointing at this
+  ADR — silent pass would be a security regression.
 
 ## Consequences
 
