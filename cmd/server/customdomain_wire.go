@@ -35,13 +35,13 @@ package main
 // when the flag is on; we keep the management.Config{DNS: nil} branch
 // for tests that intentionally simulate the unwired state.
 //
-// The enrollment-quota / circuit-breaker gate is wired to in-memory
-// no-op placeholders (zeroCount / passWindowCounter / zeroBreaker) so
-// the UI is bootable without Redis. This is INTENTIONAL for the v1
-// flag-flip — it disables the quota check, so production deploys MUST
-// swap to a Redis-backed adapter via the follow-up child issue before
-// flipping CUSTOM_DOMAIN_UI_ENABLED=1 in production. A startup WARN is
-// emitted from buildEnrollmentGate so the gap is visible in logs.
+// The enrollment-quota / circuit-breaker gate is wired to Redis-backed
+// adapters (SIN-62334 F53). When CUSTOM_DOMAIN_UI_ENABLED=1 and
+// REDIS_URL is unset, the wire-up returns a hard error — boot must
+// fail rather than serve customer traffic with the per-tenant quota
+// disabled, because the rate-limiter on /internal/tls/ask (3/min/host)
+// would otherwise be the only brake against LE quota exhaustion at
+// scale. The dev/CI path (flag off) still boots without Redis.
 //
 // Tenant identity is sourced from a request header (`X-Tenant-ID`)
 // while session/cookie auth is owned by a separate ticket. The header
@@ -61,13 +61,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	goredis "github.com/redis/go-redis/v9"
 
 	miekgresolver "github.com/pericles-luz/crm/adapters/dnsresolver/miekg"
 	pgpool "github.com/pericles-luz/crm/internal/adapter/db/postgres"
 	pgstore "github.com/pericles-luz/crm/internal/adapter/store/postgres"
 	customdomainhttp "github.com/pericles-luz/crm/internal/adapter/transport/http/customdomain"
 	"github.com/pericles-luz/crm/internal/customdomain/circuitbreaker"
+	"github.com/pericles-luz/crm/internal/customdomain/circuitbreaker/redisstate"
 	"github.com/pericles-luz/crm/internal/customdomain/enrollment"
+	"github.com/pericles-luz/crm/internal/customdomain/enrollment/rediswindow"
 	"github.com/pericles-luz/crm/internal/customdomain/management"
 	"github.com/pericles-luz/crm/internal/customdomain/validation"
 	"github.com/pericles-luz/crm/internal/iam/dnsresolver"
@@ -81,8 +84,20 @@ const (
 	envCustomDomainTenantHd = "X-Tenant-ID"
 	envCustomDomainDNSSrv   = "CUSTOMDOMAIN_DNS_SERVER"
 	envCustomDomainDNSSEC   = "CUSTOMDOMAIN_DNSSEC"
+	envCustomDomainRedisURL = "REDIS_URL"
 	enrollmentRedisPrefix   = "customdomain:enrollment"
+	breakerRedisPrefix      = "customdomain:lebreaker"
 )
+
+// ErrEnrollmentRedisRequired is returned when CUSTOM_DOMAIN_UI_ENABLED=1
+// is set but REDIS_URL is missing (or the dial fails). The caller
+// (cmd/server main) MUST treat this as a hard boot failure: shipping
+// the binary with the placeholders gone but the Redis adapter not
+// configured would silently disable the per-tenant enrollment quota
+// and the LE circuit breaker, leaving only the 3/min/host rate-limit
+// on /internal/tls/ask as a brake against LE quota exhaustion at
+// scale (SIN-62334 F53 / ADR 0079 §"Production gates").
+var ErrEnrollmentRedisRequired = errors.New("customdomain: CUSTOM_DOMAIN_UI_ENABLED=1 requires REDIS_URL")
 
 // customDomainDial is the test seam: the production wiring opens a real
 // pgxpool; tests inject a fake pool that satisfies pgstore.PgxRowsConn.
@@ -92,6 +107,37 @@ type customDomainDial func(ctx context.Context, dsn string) (customDomainPool, e
 // resolver. Production returns a *miekg.Resolver bound to the configured
 // recursive server; tests inject a deterministic in-memory fake.
 type customDomainResolverFactory func(getenv func(string) string) dnsresolver.Resolver
+
+// customDomainRedis is the narrow Redis surface buildEnrollmentGate
+// needs. *goredis.Client satisfies it; tests inject an in-memory fake
+// matching the same Eval semantics as the unit-test fakes for
+// rediswindow / redisstate.
+type customDomainRedis interface {
+	Eval(ctx context.Context, script string, keys []string, args ...any) *goredis.Cmd
+	Close() error
+}
+
+// customDomainRedisDial is the test seam for opening the Redis client.
+// Production parses REDIS_URL and pings; tests inject a stub that
+// returns a fake client without touching the network.
+type customDomainRedisDial func(ctx context.Context, redisURL string) (customDomainRedis, error)
+
+// defaultCustomDomainRedisDial is the production Redis dialer. Same
+// shape as cmd/server's defaultDial — ParseURL + NewClient + Ping. A
+// failed Ping is treated as "Redis not configured" and surfaces as
+// ErrEnrollmentRedisRequired upstream so boot fails closed.
+func defaultCustomDomainRedisDial(ctx context.Context, redisURL string) (customDomainRedis, error) {
+	opt, err := goredis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("redis url: %w", err)
+	}
+	rdb := goredis.NewClient(opt)
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		_ = rdb.Close()
+		return nil, fmt.Errorf("redis ping: %w", err)
+	}
+	return rdb, nil
+}
 
 // defaultCustomDomainResolverFactory returns a miekg-backed resolver
 // pointed at CUSTOMDOMAIN_DNS_SERVER when set, falling back to the
@@ -130,30 +176,68 @@ func defaultCustomDomainDial(ctx context.Context, dsn string) (customDomainPool,
 	return pool, nil
 }
 
+// EnrollmentRedisRequired enforces the SIN-62334 F53 hard-error gate.
+// Call from cmd/server BEFORE buildCustomDomainHandler so a
+// misconfigured production deploy fails boot rather than serving
+// traffic with the per-tenant quota and LE breaker disabled.
+//
+// Returns ErrEnrollmentRedisRequired when CUSTOM_DOMAIN_UI_ENABLED=1
+// AND REDIS_URL is unset; nil otherwise. The flag-off path bypasses
+// the check so dev/CI environments without Redis still boot the
+// public listener.
+func EnrollmentRedisRequired(getenv func(string) string) error {
+	if getenv(envCustomDomainUI) != "1" {
+		return nil
+	}
+	if getenv(envCustomDomainRedisURL) == "" {
+		return ErrEnrollmentRedisRequired
+	}
+	return nil
+}
+
 // buildCustomDomainHandler returns the registered http.Handler for the
 // SIN-62259 routes plus a cleanup func. Returns (nil, no-op) when the
-// feature is disabled or required deps cannot be reached, so the public
-// listener stays fully functional for the existing /health route.
+// feature is disabled or required deps cannot be reached, so the
+// public listener stays fully functional for the existing /health
+// route.
+//
+// SIN-62334 F53: when REDIS_URL is set the gate is wired against the
+// real Redis-backed adapters (rediswindow + redisstate +
+// pgstore.EnrollmentCountStore). When REDIS_URL is unset the gate
+// falls back to in-memory placeholders — this path is unreachable in
+// production because cmd/server calls EnrollmentRedisRequired first
+// and exits non-zero on its error. Tests that drive the wire-up
+// without a Redis stub still hit the placeholder path.
 func buildCustomDomainHandler(ctx context.Context, getenv func(string) string) (http.Handler, func()) {
-	return buildCustomDomainHandlerWithDeps(ctx, getenv, defaultCustomDomainDial, defaultCustomDomainResolverFactory)
+	return buildCustomDomainHandlerWithRedis(ctx, getenv, defaultCustomDomainDial, defaultCustomDomainResolverFactory, defaultCustomDomainRedisDial)
 }
 
 // buildCustomDomainHandlerWith is the test-friendly variant for the
-// pgxpool dial seam. Production uses the resolver factory baked into
-// buildCustomDomainHandler; tests that need to inject a fake DNS
-// resolver should call buildCustomDomainHandlerWithDeps instead. This
-// signature is preserved for backwards compatibility with the SIN-62259
-// test suite.
+// pgxpool dial seam. Production uses the resolver factory + Redis dial
+// baked into buildCustomDomainHandler; tests that need to inject a
+// fake DNS resolver or Redis client should call
+// buildCustomDomainHandlerWithDeps instead. The signature is preserved
+// for backwards compatibility with the SIN-62259 test suite, with the
+// production Redis dial wired in.
 func buildCustomDomainHandlerWith(ctx context.Context, getenv func(string) string, dial customDomainDial) (http.Handler, func()) {
-	return buildCustomDomainHandlerWithDeps(ctx, getenv, dial, defaultCustomDomainResolverFactory)
+	return buildCustomDomainHandlerWithRedis(ctx, getenv, dial, defaultCustomDomainResolverFactory, defaultCustomDomainRedisDial)
 }
 
-// buildCustomDomainHandlerWithDeps is the full test seam for the
-// SIN-62313 wire-up. Both the dial and resolverFactory arguments cover
-// network-touching paths; passing stubs short-circuits the pgxpool.New
-// and miekg.NewResolver calls so handler tests can drive the resolver
-// deterministically.
+// buildCustomDomainHandlerWithDeps is the test seam for the SIN-62313
+// wire-up. The dial / resolverFactory arguments cover the
+// network-touching paths inherited from before SIN-62334; passing
+// stubs short-circuits pgxpool.New and miekg.NewResolver so handler
+// tests can drive the wiring deterministically without Redis. Tests
+// that ALSO want to stub Redis dialing should call
+// buildCustomDomainHandlerWithRedis.
 func buildCustomDomainHandlerWithDeps(ctx context.Context, getenv func(string) string, dial customDomainDial, resolverFactory customDomainResolverFactory) (http.Handler, func()) {
+	return buildCustomDomainHandlerWithRedis(ctx, getenv, dial, resolverFactory, defaultCustomDomainRedisDial)
+}
+
+// buildCustomDomainHandlerWithRedis is the SIN-62334 test seam: same as
+// buildCustomDomainHandlerWithDeps plus a redisDial seam so unit tests
+// can drive the wire-up against an in-memory fake Redis client.
+func buildCustomDomainHandlerWithRedis(ctx context.Context, getenv func(string) string, dial customDomainDial, resolverFactory customDomainResolverFactory, redisDial customDomainRedisDial) (http.Handler, func()) {
 	noop := func() {}
 	if v := getenv(envCustomDomainUI); v != "1" {
 		return nil, noop
@@ -179,8 +263,23 @@ func buildCustomDomainHandlerWithDeps(ctx context.Context, getenv func(string) s
 		return nil, noop
 	}
 
+	// SIN-62334 F53: dial Redis when REDIS_URL is set; fall back to
+	// in-memory placeholders otherwise. The flag-on + REDIS_URL-unset
+	// path is unreachable from cmd/server.runWith because main calls
+	// EnrollmentRedisRequired first; this branch exists for the test
+	// suite that drives buildCustomDomainHandler without Redis.
+	var rdb customDomainRedis
+	if redisURL := getenv(envCustomDomainRedisURL); redisURL != "" {
+		rdb, err = redisDial(ctx, redisURL)
+		if err != nil {
+			pool.Close()
+			log.Printf("crm: custom-domain UI disabled — redis dial: %v", err)
+			return nil, noop
+		}
+	}
+
 	store := pgstore.NewCustomDomainStore(pool)
-	gate, gateCleanup := buildEnrollmentGate(pool)
+	gate, gateCleanup := buildEnrollmentGate(pool, rdb)
 	slugSvc, _ := slugreservation.NewService(
 		pgstore.NewSlugReservationStore(pool),
 		pgstore.NewSlugRedirectStore(pool),
@@ -269,33 +368,58 @@ func wrapWithDevTenantHeader(next http.Handler, _ *os.File) http.Handler {
 	})
 }
 
-// buildEnrollmentGate wires *enrollment.UseCase against in-memory no-op
-// placeholders (zeroCount / passWindowCounter / zeroBreaker) so the UI
-// is bootable without Redis. This effectively DISABLES the per-tenant
-// enrollment quota and the LE circuit breaker on the public listener
-// — the production swap is tracked in the follow-up child issue
-// referenced from the package doc.
+// buildEnrollmentGate wires *enrollment.UseCase against the production
+// Redis-backed adapters when rdb != nil (SIN-62334 F53):
 //
-// A startup WARN is emitted on every wire-up so the gap is visible in
-// production logs; do not flip CUSTOM_DOMAIN_UI_ENABLED=1 in a
-// customer-facing environment until the Redis-backed adapter has
-// replaced these placeholders.
-func buildEnrollmentGate(_ pgstore.PgxConn) (management.EnrollmentGate, func()) {
-	slog.Default().Warn(
-		"customdomain: enrollment quota and circuit breaker are running in dev/no-op mode (in-memory placeholders); swap to Redis-backed adapters before flipping CUSTOM_DOMAIN_UI_ENABLED=1 in production",
-		slog.String("component", "customdomain.management"),
-		slog.String("gate", "enrollment"),
-		slog.String("breaker", "letsencrypt"),
-	)
+//   - CountStore     -> pgstore.NewEnrollmentCountStore (Postgres
+//     COUNT(*) on the same partial unique index the UI reads from).
+//   - WindowCounter  -> rediswindow.New (sorted-set sliding window
+//     5/h, 20/d, 50/mo).
+//   - Breaker        -> circuitbreaker.New backed by redisstate (5
+//     failures / 1h => 24h freeze, persisted across restarts).
+//
+// When rdb is nil (test path; production hard-errors before reaching
+// this via EnrollmentRedisRequired), the gate falls back to in-memory
+// placeholders so tests that drive the wire-up without Redis still
+// work. Returning a cleanup func keeps the Redis client lifecycle
+// aligned with the rest of the wire-up.
+func buildEnrollmentGate(pool pgstore.PgxConn, rdb customDomainRedis) (management.EnrollmentGate, func()) {
+	if rdb == nil {
+		gate := enrollment.New(
+			zeroCount{},
+			passWindowCounter{},
+			zeroBreaker{},
+			nil,
+			time.Now,
+			enrollment.DefaultQuota(),
+		)
+		return enrollmentGateAdapter{gate: gate}, func() {}
+	}
+	store := pgstore.NewEnrollmentCountStore(pool)
+	winCounter := rediswindow.New(rdb, enrollmentRedisPrefix)
+	breakerState := redisstate.New(rdb, breakerRedisPrefix)
+	breaker := circuitbreaker.New(breakerState, nil, time.Now, circuitbreaker.DefaultConfig())
 	gate := enrollment.New(
-		zeroCount{},
-		passWindowCounter{},
-		zeroBreaker{},
+		store,
+		winCounter,
+		breakerAdapter{uc: breaker},
 		nil,
 		time.Now,
 		enrollment.DefaultQuota(),
 	)
-	return enrollmentGateAdapter{gate: gate}, func() {}
+	cleanup := func() {
+		_ = rdb.Close()
+	}
+	return enrollmentGateAdapter{gate: gate}, cleanup
+}
+
+// breakerAdapter projects circuitbreaker.UseCase into enrollment.Breaker.
+// The use-case carries the policy (5/1h trip → 24h freeze); the gate
+// only reads IsOpen from it.
+type breakerAdapter struct{ uc *circuitbreaker.UseCase }
+
+func (b breakerAdapter) IsOpen(ctx context.Context, tenantID uuid.UUID, now time.Time) (bool, error) {
+	return b.uc.IsOpen(ctx, tenantID, now)
 }
 
 // enrollmentGateAdapter projects enrollment.Result into management.EnrollmentDecision.
@@ -441,9 +565,11 @@ func (d dnsCheckerAdapter) Check(ctx context.Context, host, expectedToken string
 	return management.DNSCheckResult{WithDNSSEC: res.VerifiedWithDNSSEC}, nil
 }
 
-// zeroCount, passWindowCounter, zeroBreaker are dev placeholders that
-// keep the gate live without Redis. Production deploys MUST replace
-// them with the real Redis-backed adapters before flipping the flag.
+// zeroCount, passWindowCounter, zeroBreaker are dev-only placeholders
+// retained for the test path that drives buildCustomDomainHandler
+// without REDIS_URL. Production never reaches them — cmd/server's
+// runWith calls EnrollmentRedisRequired before this function and exits
+// non-zero on its error (SIN-62334 F53).
 type zeroCount struct{}
 
 func (zeroCount) ActiveCount(context.Context, uuid.UUID) (int, error) { return 0, nil }
@@ -490,6 +616,7 @@ var (
 	_ enrollment.CountStore             = zeroCount{}
 	_ enrollment.WindowCounter          = passWindowCounter{}
 	_ enrollment.Breaker                = zeroBreaker{}
+	_ enrollment.Breaker                = breakerAdapter{}
 	_ slugreservation.MasterAuditLogger = nopAudit{}
 	_ slugreservation.SlackNotifier     = nopSlack{}
 	_ management.EnrollmentGate         = enrollmentGateAdapter{}

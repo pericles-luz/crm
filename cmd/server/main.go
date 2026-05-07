@@ -148,6 +148,14 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 		log.Printf("crm: webhook intake mounted on public listener")
 	}
 
+	// SIN-62334 F53: hard-fail boot when CUSTOM_DOMAIN_UI_ENABLED=1 and
+	// REDIS_URL is unset. Returning the error from runWith propagates to
+	// main(), which exits non-zero — the orchestrator restarts and the
+	// operator sees the failed boot rather than serving traffic with the
+	// per-tenant quota and LE breaker disabled.
+	if err := EnrollmentRedisRequired(getenv); err != nil {
+		return fmt.Errorf("custom-domain wire-up: %w", err)
+	}
 	cdHandler, cdCleanup := buildCustomDomainHandler(ctx, getenv)
 	defer cdCleanup()
 	if cdHandler != nil {
