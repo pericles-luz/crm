@@ -1,0 +1,199 @@
+# ADR 0084 — Software Supply Chain (cosign keyless + SBOM + Dependabot)
+
+- Status: accepted
+- Date: 2026-05-07
+- Deciders: CTO, SecurityEngineer, Coder (impl)
+- Tickets: [SIN-62247](/SIN/issues/SIN-62247) (impl), bundle [SIN-62231](/SIN/issues/SIN-62231), phase [SIN-62199](/SIN/issues/SIN-62199)
+
+## Context
+
+The CRM service ships as a container image to staging (and, in Fase 6, to
+production) via the existing GitHub Actions pipeline:
+
+- `.github/workflows/ci.yml` runs the test suite on every PR.
+- `.github/workflows/cd-stg.yml` reacts to a green `ci` run on `main`, builds
+  the multi-stage distroless image from `Dockerfile`, pushes it to
+  `ghcr.io/pericles-luz/crm`, then SSHes into the staging VPS to invoke
+  `/opt/crm/stg/bin/deploy.sh` (sourced from `deploy/scripts/stg-deploy.sh`).
+
+That host-side wrapper writes the new digest into `.env.stg`, runs
+`docker compose pull && up -d`, and prunes dangling images. The CD SSH key is
+locked down with `command="/opt/crm/stg/bin/deploy.sh",no-pty,…` in
+`authorized_keys` so this script is the *only* thing the runner can execute on
+the host (see `docs/deploy/staging.md`).
+
+Before Fase 6 cuts the first production release we need to guarantee that:
+
+1. Every image consumed at deploy time was produced by **our** GitHub workflow
+   on a commit reachable from `main`/a release tag, and has not been replaced
+   or backdoored on the registry between push and pull.
+2. We can answer "what's inside this image?" — i.e. produce and persist a
+   bill of materials per release for vulnerability response and LGPD audits.
+3. Known-vulnerable transitive dependencies (Go modules, GitHub Actions,
+   container base images) cannot quietly accumulate; CI must surface and
+   block them.
+
+Today the build pipeline produces unsigned images and no SBOM, and the deploy
+wrapper trusts whatever digest the runner hands it. `govulncheck` already
+gates per-PR via `.github/workflows/govulncheck.yml` (SIN-62298), but it only
+covers reachable Go CVEs — it does not answer #1 or #2.
+
+## Decision
+
+We adopt a four-part supply-chain baseline, layered onto the existing
+pipeline rather than parallel to it.
+
+### 1. Image signing — cosign keyless via GitHub OIDC
+
+- The existing build/push step in `cd-stg.yml` is followed by
+  `cosign sign --yes "${IMAGE}@${digest}"` using
+  [Sigstore cosign](https://docs.sigstore.dev/cosign/overview) in **keyless**
+  mode. The signature is anchored to the **digest** returned by
+  `docker/build-push-action`, never the floating tag.
+- Authentication uses the workflow's GitHub OIDC token. No long-lived signing
+  key is stored anywhere — Sigstore Fulcio mints a short-lived certificate
+  bound to the workflow identity for the duration of the run.
+- Identity binding (verifier side): the signer certificate's SAN must match
+  `^https://github.com/pericles-luz/.+` and the OIDC issuer must be
+  `https://token.actions.githubusercontent.com`. Anything else is rejected.
+
+### 2. Deploy verify gate
+
+- `deploy/scripts/stg-deploy.sh` (the host-side deploy wrapper invoked over
+  SSH) runs `cosign verify` against the requested digest **before** any
+  `docker compose pull`/`up`. A missing or invalid signature aborts the
+  deploy with a non-zero exit and `compose pull` is never reached.
+- The same script is the only sanctioned deploy path: the SSH key in
+  `authorized_keys` is locked to `/opt/crm/stg/bin/deploy.sh`, so manual
+  `docker compose pull && up -d` is structurally out of policy unless an
+  operator with `sudo -u crm-deploy` privilege intervenes (a separate
+  break-glass path that requires a logged shell session on the VPS).
+- Break-glass: there is intentionally no `--skip-verify` flag. To bypass the
+  gate during a Sigstore outage, an operator must edit the deploy script on
+  the host (or the source under `deploy/scripts/`) and the change must go
+  through PR review. See `Rollback` below.
+
+### 3. SBOM via Syft + cosign attest
+
+- After the image is signed, `cd-stg.yml` runs
+  [Syft](https://github.com/anchore/syft) against the same digest to produce:
+  - a CycloneDX 1.5 JSON SBOM (`sbom.cyclonedx.json`),
+  - and an SPDX 2.3 JSON SBOM (`sbom.spdx.json`).
+- Both SBOMs are uploaded as workflow artifacts (90-day retention) so vuln
+  triage can pull them without re-running the build.
+- Each SBOM is bound to the image with a cosign attestation
+  (`cosign attest --predicate ... --type cyclonedx|spdxjson`), so downstream
+  consumers can fetch them with `cosign download attestation` against any
+  surviving copy of the image.
+
+### 4. Dependency hygiene
+
+- `.github/dependabot.yml` opens weekly PRs (Mondays, America/Sao_Paulo) for:
+  - Go modules (`gomod`) at the repo root,
+  - GitHub Actions (`github-actions`),
+  - Docker base images (`docker`) at the repo root.
+- `.github/workflows/security-alerts.yml` queries the GitHub Dependabot
+  vulnerability alerts API on every PR and on a daily weekday cron. **Any
+  open alert with severity `high` or `critical` fails the workflow.** This is
+  a hard gate, not a comment-only signal.
+
+## Consequences
+
+Positive:
+
+- Tampering with an image on `ghcr.io` after publish is detectable — the
+  signature won't verify against the new digest, and `stg-deploy.sh` refuses
+  to pull.
+- An attacker who steals our registry credentials still cannot push a signed
+  image, because cosign keyless requires the GitHub OIDC token of an identity
+  matching `github.com/pericles-luz/.+`.
+- Every prod-bound image has a CycloneDX + SPDX SBOM tied to its digest,
+  satisfying LGPD audit requests ("which version of which library was running
+  on date X").
+- Known-vulnerable dependencies cannot sit unpatched longer than a weekly
+  bump cycle, and a high/critical CVE introduced in a PR fails CI before
+  merge.
+
+Negative / costs:
+
+- Extra ~30–60 s per `cd-stg` run for signing + SBOM generation.
+- Deploys depend on the Sigstore public-good infrastructure (`fulcio`,
+  `rekor`). Outage there blocks deploys; mitigation is the documented
+  break-glass below (manual host-side edit, PR-reviewed afterwards).
+- The staging VPS now requires `cosign` (>= v2.4) installed in `PATH`. The
+  staging runbook (`docs/deploy/staging.md`) documents the install step
+  alongside the existing Docker bootstrap.
+- Weekly Dependabot PRs require triage discipline. Owner: CTO rotates with
+  Coder.
+
+## Alternatives considered
+
+- **Notary v2 / OCI signatures only** — newer, less tooling, no first-class
+  GitHub OIDC keyless flow today. Rejected: cosign + Sigstore is the de facto
+  standard and Notary v2 adoption inside our toolchain (CI runners, kubectl
+  plugins, IDE) is still thin.
+- **Manual GPG signing with a long-lived team key** — requires key custody,
+  rotation, revocation, and HSM. Rejected: long-lived keys are exactly what
+  keyless eliminates, and we have no operational maturity to manage one
+  safely.
+- **A separate `build-sign.yml` workflow alongside `cd-stg.yml`** — cleaner
+  separation of concerns, but produces two parallel build/push pipelines for
+  the same image, which doubles GHCR storage churn and creates a window
+  where a `cd-stg`-built image is unsigned. Rejected in favour of layering
+  signing onto the existing `cd-stg.yml`.
+- **Renovate instead of Dependabot** — more flexible grouping, but adds a
+  third-party app + secret. Rejected for boring-tech budget; Dependabot is
+  native to GitHub and good enough for our dependency surface today.
+- **Trivy/Grype scanning of images instead of API-driven alerts** — useful
+  but complementary; image scanning is on the roadmap inside ADR 0085
+  (container hardening). For dependency-level signal we prefer GitHub's
+  first-party alerting because it covers the full transitive graph and the
+  alerts have repo-wide visibility for triage.
+
+## Verification (regression tests)
+
+Local checks under `tools/supply-chain/`:
+
+1. `tools/supply-chain/test_deploy_gate.sh` — invokes
+   `deploy/scripts/stg-deploy.sh` against fake `docker` and `cosign` binaries
+   on `PATH` and asserts:
+   - the deploy proceeds (and `compose pull && up -d` are invoked) only when
+     `cosign verify` returns 0,
+   - the deploy aborts (and `compose pull` is *never* invoked) when
+     `cosign verify` returns non-zero.
+2. `tools/supply-chain/test_workflow_invariants.sh` — greps `cd-stg.yml`,
+   `security-alerts.yml`, and `dependabot.yml` for the cosign sign step,
+   both SBOM steps, the cosign attest steps, the >=high severity gate, and
+   the three Dependabot ecosystems. Catches accidental removal during
+   YAML edits.
+
+CI-only checks (run against real images / real Dependabot alerts):
+
+3. `syft <image>` schema validation (CycloneDX + SPDX) is implicit: the
+   `cd-stg` SBOM steps fail closed if Syft cannot emit the format.
+4. A test PR introducing a Go module with a known HIGH CVE causes the
+   `security-alerts` workflow to fail.
+
+## Out of scope (handled in sibling ADRs)
+
+- Container hardening (distroless base, non-root UID, read-only rootfs) is
+  already partially addressed in the current `Dockerfile` (distroless
+  static, non-root UID 65532). Full hardening review is ADR 0085.
+- Encryption-at-rest of database backups → separate ticket in the F59 bundle.
+- Pre-commit hooks (gitleaks, gofmt) → separate ticket in the F59 bundle.
+- `govulncheck` per-PR is already in place via `.github/workflows/govulncheck.yml`
+  (SIN-62298). Weekly out-of-PR sweep → [SIN-62251](/SIN/issues/SIN-62251).
+
+## Rollback
+
+- Disable the verify gate by editing `deploy/scripts/stg-deploy.sh`, removing
+  the `verify_image` call, and re-installing the script on the VPS via the
+  documented `scp` + `install` flow in `docs/deploy/staging.md`. The change
+  must go through PR review.
+- Drop the cosign + SBOM steps from `cd-stg.yml` to revert to unsigned
+  pushes; the registry still holds prior unsigned images, so older deploys
+  remain reachable.
+- Dependabot PRs are independent and can be paused per ecosystem with
+  `enabled: false` in `.github/dependabot.yml`.
+- The `security-alerts` gate can be made advisory-only by changing `exit 1`
+  to `exit 0`; not recommended.
