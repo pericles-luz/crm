@@ -9,6 +9,12 @@
 // tests can observe denial and recovery deterministically inside a few
 // seconds.
 //
+// SIN-62320: the fixture also mounts the production CSP middleware
+// (internal/http/middleware/csp) so every fixture response carries the
+// same Content-Security-Policy header the production hosts emit. Without
+// this, regressions that re-introduce inline `<style>`/`<script>` would
+// pass the e2e suite even though the production CSP would drop them.
+//
 // Routes (all served on -addr, default 127.0.0.1:8088):
 //
 //	GET  /                  Host HTML page (htmx + aipanel.css + LiveButton)
@@ -34,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"html/template"
 	"log"
 	"log/slog"
 	"net/http"
@@ -45,6 +52,7 @@ import (
 
 	aiport "github.com/pericles-luz/crm/internal/ai/port"
 	"github.com/pericles-luz/crm/internal/http/handler/aipanel"
+	"github.com/pericles-luz/crm/internal/http/middleware/csp"
 	"github.com/pericles-luz/crm/internal/http/middleware/ratelimit"
 )
 
@@ -70,11 +78,11 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	limiter := newTokenBucketLimiter(*cooldown)
-	mux := buildMux(limiter, *cooldown, *staticDir)
+	handler := buildHandler(limiter, *cooldown, *staticDir)
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -106,15 +114,26 @@ func run(ctx context.Context, args []string) error {
 	return nil
 }
 
+// buildHandler wraps the fixture mux with the production CSP middleware
+// so every response carries the same Content-Security-Policy the prod
+// hosts emit. Mirrors `csp.Middleware(mux)` in cmd/server/main.go.
+func buildHandler(limiter aiport.RateLimiter, retryAfter time.Duration, staticDir string) http.Handler {
+	return csp.Middleware(buildMux(limiter, retryAfter, staticDir))
+}
+
 func buildMux(limiter aiport.RateLimiter, retryAfter time.Duration, staticDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(hostPage))
+		// The template is parsed at init() and the payload is a fixed
+		// struct; Execute cannot fail in practice. We swallow the error
+		// here for symmetry with the original `_, _ = w.Write(...)` and
+		// to keep the fixture trivially testable.
+		_ = hostPageTmpl.Execute(w, hostPageData{Nonce: csp.Nonce(r.Context())})
 	})
 
 	mux.HandleFunc("GET /refresh", func(w http.ResponseWriter, _ *http.Request) {
@@ -204,25 +223,27 @@ func staticIdentity(*http.Request) (string, string, string, error) {
 	return "tenant-e2e", "user-e2e", "conv-e2e", nil
 }
 
-// hostPage is the minimal HTML the Playwright suite drives. It pulls the
-// vendored htmx bundle and the production aipanel.css, then renders the
-// live button into the swap slot via a server-side hx-get on load. This
-// keeps the Go side as the single source of truth for the button HTML.
-//
-// The inline <script> wires htmx:beforeSwap so the cooldown fragment
-// (served with a 429 / 503 status) actually gets swapped into the DOM.
-// htmx 2.x defaults to NOT swapping on 4xx/5xx responses, so any real
-// host page that wants to render the AI panel cooldown UI MUST opt in
-// here. The fixture documents the smallest correct opt-in for the two
-// status codes the rate-limit middleware emits.
-const hostPage = `<!doctype html>
+// hostPageData is the template payload for the fixture host page. Nonce
+// is the per-request CSP nonce stamped on every inline `<script>` the
+// page owns; the value comes from csp.Nonce(r.Context()) and the upstream
+// csp middleware is the source.
+type hostPageData struct {
+	Nonce string
+}
+
+// hostPageTmpl is the parsed-once host page template. The single inline
+// `<script>` carries `nonce="{{.Nonce}}"` so it survives the production
+// CSP (`script-src 'self' 'nonce-{N}'`). External assets (htmx + the
+// production aipanel.css) are pulled from /static/ and matched by the
+// `'self'` source — they do not need a nonce.
+var hostPageTmpl = template.Must(template.New("hostPage").Parse(`<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <title>AI Panel cooldown E2E fixture (SIN-62318)</title>
   <link rel="stylesheet" href="/static/css/aipanel.css">
   <script src="/static/vendor/htmx/2.0.9/htmx.min.js"></script>
-  <script>
+  <script nonce="{{.Nonce}}">
     document.addEventListener('htmx:beforeSwap', function (evt) {
       var status = evt.detail && evt.detail.xhr && evt.detail.xhr.status;
       if (status === 429 || status === 503) {
@@ -253,7 +274,7 @@ const hostPage = `<!doctype html>
   </main>
 </body>
 </html>
-`
+`))
 
 // tokenBucketLimiter is a tiny in-memory port.RateLimiter for the fixture.
 // Capacity is 1 token per (bucket,key) pair; one token refills every

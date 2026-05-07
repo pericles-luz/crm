@@ -446,3 +446,145 @@ func waitForListener(addr string, timeout time.Duration) error {
 	}
 	return errors.New("timeout waiting for listener")
 }
+
+// TestBuildHandler_EmitsProductionCSPOnEveryResponse is the SIN-62320
+// regression bar: the fixture must serve the same Content-Security-Policy
+// header production hosts emit, with a per-request nonce-based style-src
+// and no 'unsafe-inline'. Without this wiring the e2e suite passes even
+// when the cooldown fragment regresses to inline `style="…"`, because the
+// fixture has no CSP and the browser keeps the inline attribute that
+// production would drop.
+//
+// Asserts the same shape on the three response surfaces the Playwright
+// suite drives: the host page (GET /), the live button (POST /regen ok)
+// and the cooldown fragment (POST /regen denied).
+func TestBuildHandler_EmitsProductionCSPOnEveryResponse(t *testing.T) {
+	t.Parallel()
+	handler := buildHandler(newTokenBucketLimiter(2*time.Second), 2*time.Second, "./testdata-static")
+
+	cases := []struct {
+		name string
+		req  *http.Request
+	}{
+		{"host_page", httptest.NewRequest(http.MethodGet, "/", nil)},
+		{"live_button", httptest.NewRequest(http.MethodPost, "/regen", nil)},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, tc.req)
+			assertProductionCSP(t, rec.Header().Get("Content-Security-Policy"))
+		})
+	}
+
+	// Cooldown fragment travels through the rate-limit middleware, which
+	// owns its own WriteHeader. Burn the bucket and assert the 429
+	// response carries the same policy — the CSP wrapper sits outside
+	// the rate limiter so the header must be present regardless.
+	cooldownHandler := buildHandler(newTokenBucketLimiter(2*time.Second), 2*time.Second, "./testdata-static")
+	first := httptest.NewRecorder()
+	cooldownHandler.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/regen", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("seed status = %d, want 200", first.Code)
+	}
+	denied := httptest.NewRecorder()
+	cooldownHandler.ServeHTTP(denied, httptest.NewRequest(http.MethodPost, "/regen", nil))
+	if denied.Code != http.StatusTooManyRequests {
+		t.Fatalf("denied status = %d, want 429", denied.Code)
+	}
+	assertProductionCSP(t, denied.Header().Get("Content-Security-Policy"))
+}
+
+// TestBuildHandler_HostPageScriptCarriesCSPNonce verifies the inline
+// `<script>` on the host page is stamped with the per-request nonce so
+// the browser actually executes it under the production CSP. Without the
+// nonce attribute the htmx 4xx/5xx swap opt-in script would be dropped
+// and the cooldown fragment would never reach the DOM.
+func TestBuildHandler_HostPageScriptCarriesCSPNonce(t *testing.T) {
+	t.Parallel()
+	handler := buildHandler(newTokenBucketLimiter(time.Second), time.Second, "./testdata-static")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	hdr := rec.Header().Get("Content-Security-Policy")
+	headerNonce := extractNonce(hdr, "script-src")
+	if headerNonce == "" {
+		t.Fatalf("CSP header missing script-src nonce: %s", hdr)
+	}
+	body := rec.Body.String()
+	want := `<script nonce="` + headerNonce + `">`
+	if !strings.Contains(body, want) {
+		t.Errorf("host page <script> missing matching nonce attribute %q\nbody: %s", want, body)
+	}
+}
+
+// TestBuildHandler_PerRequestUniqueNonces guards the per-request freshness
+// of the CSP nonce on the fixture surface. The csp middleware enforces
+// this in its own suite; this test is a light sanity check that the
+// fixture wiring did not accidentally cache a single nonce across
+// requests.
+func TestBuildHandler_PerRequestUniqueNonces(t *testing.T) {
+	t.Parallel()
+	handler := buildHandler(newTokenBucketLimiter(time.Second), time.Second, "./testdata-static")
+
+	get := func() string {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		return extractNonce(rec.Header().Get("Content-Security-Policy"), "script-src")
+	}
+
+	a, b := get(), get()
+	if a == "" || b == "" {
+		t.Fatalf("missing nonce on one of the responses (a=%q, b=%q)", a, b)
+	}
+	if a == b {
+		t.Fatalf("expected distinct per-request nonces, got %q twice", a)
+	}
+}
+
+// assertProductionCSP fails the test unless hdr matches the production
+// policy shape: contains every required directive, carries a script-src
+// and style-src nonce, and never includes 'unsafe-inline'.
+func assertProductionCSP(t *testing.T, hdr string) {
+	t.Helper()
+	if hdr == "" {
+		t.Fatalf("missing Content-Security-Policy header")
+	}
+	for _, want := range []string{
+		"default-src 'self'",
+		"script-src 'self' 'nonce-",
+		"style-src 'self' 'nonce-",
+		"object-src 'none'",
+		"base-uri 'self'",
+		"frame-ancestors 'none'",
+	} {
+		if !strings.Contains(hdr, want) {
+			t.Errorf("CSP header missing %q\nfull header: %s", want, hdr)
+		}
+	}
+	if strings.Contains(hdr, "'unsafe-inline'") {
+		t.Errorf("CSP header must NOT contain 'unsafe-inline'; got: %s", hdr)
+	}
+}
+
+// extractNonce pulls the per-request nonce out of the directive named by
+// `prefix` (e.g. "script-src" or "style-src") in a CSP header. Returns
+// the empty string when no nonce is present.
+func extractNonce(hdr, prefix string) string {
+	needle := prefix + " 'self' 'nonce-"
+	i := strings.Index(hdr, needle)
+	if i < 0 {
+		return ""
+	}
+	rest := hdr[i+len(needle):]
+	end := strings.Index(rest, "'")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}

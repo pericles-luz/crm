@@ -216,6 +216,40 @@ test.describe("AI panel cooldown UI", () => {
     expect(onSwapTarget || onBody).toBeTruthy();
   });
 
+  // SIN-62320: the fixture mounts the production CSP middleware so the
+  // browser-smoke suite catches any regression that re-introduces inline
+  // `style="…"` or unattributed `<script>` tags. Without this assertion,
+  // a future revert of SIN-62319's bucket-attribute approach would pass
+  // here even though the production CSP would silently drop the inline
+  // style. Asserting on the cooldown response — the surface SIN-62319
+  // explicitly hardened — is the smallest signal that the policy is live.
+  test("CSP header has nonce-based style-src and no 'unsafe-inline' on the cooldown response", async ({
+    page,
+    request,
+  }) => {
+    // Burn the bucket so the next POST is denied with the cooldown
+    // fragment. Both responses must carry the production CSP — the
+    // wrapper sits outside the rate-limit middleware.
+    const okPromise = waitForRegen(page);
+    await liveButton(page).click();
+    const ok = await okPromise;
+    const okCSP = ok.headers()["content-security-policy"];
+    expect(okCSP).toBeTruthy();
+    expect(okCSP).toContain("style-src 'self' 'nonce-");
+    expect(okCSP).not.toContain("'unsafe-inline'");
+
+    const denyResponse = await request.post("/regen");
+    expect(denyResponse.status()).toBe(429);
+    const denyCSP = denyResponse.headers()["content-security-policy"];
+    expect(denyCSP).toBeTruthy();
+    expect(denyCSP).toContain("default-src 'self'");
+    expect(denyCSP).toContain("script-src 'self' 'nonce-");
+    expect(denyCSP).toContain("style-src 'self' 'nonce-");
+    expect(denyCSP).toContain("object-src 'none'");
+    expect(denyCSP).toContain("frame-ancestors 'none'");
+    expect(denyCSP).not.toContain("'unsafe-inline'");
+  });
+
   test("layout shift score is ~0 across the swap (no CLS)", async ({ page }) => {
     // Wire a PerformanceObserver before the click so we capture every
     // shift entry produced by the swap. The shipped CSS gives both
