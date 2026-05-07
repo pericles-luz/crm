@@ -119,6 +119,26 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
 systemctl enable --now docker
 ```
 
+Install cosign (>= v2.4) — required by `stg-deploy.sh` to verify the cosign
+keyless signature on every image before `compose pull` (ADR 0084 / SIN-62247).
+A missing or out-of-date binary is a hard failure of the deploy gate, not a
+warning.
+
+```bash
+COSIGN_VERSION="2.4.1"
+COSIGN_SHA256="REPLACE_WITH_RELEASE_CHECKSUM_FROM_GITHUB"
+curl -fsSL \
+  "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
+  -o /usr/local/bin/cosign
+echo "${COSIGN_SHA256}  /usr/local/bin/cosign" | sha256sum --check --strict
+chmod +x /usr/local/bin/cosign
+cosign version
+```
+
+Bumping `COSIGN_VERSION` here MUST also bump `COSIGN_VERSION` in
+`.github/workflows/cd-stg.yml` so the signer and verifier track the same
+release line.
+
 Quick troubleshooting if `apt-get install docker-ce` says
 `Package docker-ce is not available`:
 
