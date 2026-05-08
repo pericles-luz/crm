@@ -199,3 +199,76 @@ func TestNewAppMux_LoginRouteMounted(t *testing.T) {
 		t.Fatalf("/login (unknown host) status = %d, want 404 (TenantScope)", rec.Code)
 	}
 }
+
+// TestNewAppMux_HelloTenantRequiresAuth proves the SIN-62217 chi router
+// applies the Auth middleware to /hello-tenant — an unauthenticated
+// request must redirect to /login?next=/hello-tenant (302), not 200.
+func TestNewAppMux_HelloTenantRequiresAuth(t *testing.T) {
+	t.Parallel()
+	tenantID := uuid.New()
+	d := &deps{tenants: stubResolver{tenants: map[string]*tenancy.Tenant{
+		"acme.crm.local": {ID: tenantID, Name: "Acme", Host: "acme.crm.local"},
+	}}}
+	mux := newAppMux(d)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/hello-tenant", nil)
+	req.Host = "acme.crm.local"
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (Auth → login redirect)", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "/login") {
+		t.Fatalf("Location = %q, want /login redirect", loc)
+	}
+}
+
+func TestCookieSecureFromEnv_DefaultsToTrue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{"unset", "", true},
+		{"true literal", "true", true},
+		{"random word", "yes", true},
+		{"1", "1", true},
+		{"false lowercase", "false", false},
+		{"FALSE uppercase", "FALSE", false},
+		{"zero", "0", false},
+		{"off", "off", false},
+		{"trimmed false", "  false  ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(k string) string {
+				if k == "COOKIE_SECURE" {
+					return tc.env
+				}
+				return ""
+			}
+			if got := cookieSecureFromEnv(getenv); got != tc.want {
+				t.Fatalf("cookieSecureFromEnv(%q) = %v, want %v", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTenantIAMAdapter_LockoutFreeService_BuildsServiceLiteral covers
+// the seam tenantIAMAdapter.Logout/ValidateSession share. Both go
+// through lockoutFreeService(); a returned non-nil *iam.Service whose
+// Lockouts field is nil proves the expected wiring (per the docstring,
+// the lockout-free path is intentional because tenantID is explicit).
+func TestTenantIAMAdapter_LockoutFreeService_BuildsServiceLiteral(t *testing.T) {
+	t.Parallel()
+	d := &deps{tenants: stubResolver{}, logger: nil}
+	a := tenantIAMAdapter{deps: d}
+	svc := a.lockoutFreeService()
+	if svc == nil {
+		t.Fatal("lockoutFreeService returned nil")
+	}
+	if svc.Lockouts != nil {
+		t.Fatalf("Lockouts = %v, want nil (no lockout port on Logout/ValidateSession)", svc.Lockouts)
+	}
+}

@@ -17,12 +17,20 @@ package main
 //
 // HTTP composition (newAppMux):
 //
-//   - /health remains the bare healthHandler so the existing
-//     unit tests + the ops liveness probe keep working.
-//   - /login is mounted under the TenantScope middleware so
-//     tenant.FromContext is always populated when the per-request
-//     iam.Service is built (see tenantLoginAdapter — that is where
-//     NewTenantLockouts(pool, tenant.ID) happens).
+//   - /health, /login (GET+POST), /logout, /hello-tenant are mounted
+//     via httpapi.NewRouter (the chi router from SIN-62217). The
+//     middleware chain stitched there is:
+//
+//         RequestID → RealIP → Logger → Recoverer → TenantScope → Auth
+//
+//     /health bypasses TenantScope (LB liveness must work without
+//     tenant resolution); /hello-tenant requires Auth (cookie session
+//     validated against iam.ValidateSession). /login GET+POST and
+//     /logout sit under TenantScope but outside Auth.
+//   - tenantIAMAdapter is the seam between the chi handlers and the
+//     SIN-62341 lockout chain: Login is per-request (NewTenantLockouts
+//     captures tenant.ID), Logout/ValidateSession use a global Service
+//     literal because they don't touch the lockout port.
 //
 // The master Service factory is built but the master HTTP routes
 // (POST /m/login etc.) are deferred to the master-MFA ticket
@@ -38,6 +46,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,8 +54,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	postgresadapter "github.com/pericles-luz/crm/internal/adapter/db/postgres"
+	"github.com/pericles-luz/crm/internal/adapter/httpapi"
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/loginhandler"
-	"github.com/pericles-luz/crm/internal/adapter/httpapi/middleware"
 	"github.com/pericles-luz/crm/internal/adapter/notify/slack"
 	rlredis "github.com/pericles-luz/crm/internal/adapter/ratelimit/redis"
 	"github.com/pericles-luz/crm/internal/iam"
@@ -62,6 +71,24 @@ const envRedisURL = "REDIS_URL"
 // lockout alerter. Empty ⇒ no-op (slack.New documents the contract).
 const envSlackWebhook = "SLACK_WEBHOOK_URL"
 
+// envCookieSecure overrides the default-true Secure attribute on the
+// session cookie. Read by cookieSecureFromEnv; only the literal
+// strings "false", "0", and "off" (any case, trimmed) flip it off.
+const envCookieSecure = "COOKIE_SECURE"
+
+// cookieSecureFromEnv returns whether the session cookie's Secure
+// attribute should be set. Defaults to true so production deployments
+// (which never set the env var) get the safe behaviour by default;
+// only an explicit opt-out flips it off.
+func cookieSecureFromEnv(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv(envCookieSecure))) {
+	case "false", "0", "off":
+		return false
+	default:
+		return true
+	}
+}
+
 // deps is the assembled dependency graph the HTTP layer consumes.
 // Closed via cleanup returned from assembleDeps.
 type deps struct {
@@ -75,6 +102,12 @@ type deps struct {
 	sessions      *postgresadapter.SessionStore
 	logger        *slog.Logger
 	masterService masterServiceFactory
+	// cookieSecure flips the Secure attribute on the session cookie
+	// the chi login handler writes. Defaults to true (production-safe);
+	// COOKIE_SECURE=false unsets it for plaintext local-dev / test
+	// servers (httptest.Server is plain HTTP, so cookies with Secure
+	// would be dropped by the test client).
+	cookieSecure bool
 }
 
 // assembleDeps wires the production dependency graph from environment
@@ -137,6 +170,7 @@ func assembleDeps(ctx context.Context, getenv func(string) string, logger *slog.
 		sessions:      sessions,
 		logger:        logger,
 		masterService: masterFactory,
+		cookieSecure:  cookieSecureFromEnv(getenv),
 	}
 	cleanup := func() {
 		d.pool.Close()
@@ -167,26 +201,65 @@ func openRedis(ctx context.Context, url string) (*goredis.Client, error) {
 	return client, nil
 }
 
-// newAppMux mounts the production routes on a stdlib mux:
-//
-//   - /health (no middleware) — liveness.
-//   - /login under TenantScope → per-request iam.Service.Login.
-//
-// Any other path is a 404. New routes added in follow-up tickets
-// (master endpoints, password reset, etc.) plug in here. The chi
-// router from SIN-62217 will replace this when that PR lands; the
-// route shape stays identical.
+// newAppMux returns the production HTTP handler. Originally a stdlib
+// mux, the implementation now delegates to httpapi.NewRouter (the chi
+// router from SIN-62217); the symbol name is preserved so the
+// existing wire_test.go coverage (TestNewAppMux_*) continues to
+// describe the wireup boundary. The route shape /health, /login is
+// unchanged — only the multiplexer underneath changed, plus the new
+// /logout and /hello-tenant routes from SIN-62217 §Routes.
 func newAppMux(d *deps) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
+	return httpapi.NewRouter(httpapi.Deps{
+		IAM:            tenantIAMAdapter{deps: d},
+		TenantResolver: d.tenants,
+		Logger:         d.logger,
+		CookieSecure:   d.cookieSecure,
+	})
+}
 
-	tenantScope := middleware.TenantScope(d.tenants)
-	loginH := tenantScope(loginhandler.New(
-		tenantLoginAdapter(d),
-		loginhandler.WithLogger(d.logger),
-	))
-	mux.Handle("/login", loginH)
-	return mux
+// tenantIAMAdapter satisfies httpapi.IAMService. It bridges PR #7's
+// chi router to the SIN-62341 lockout chain.
+//
+// Login routes through tenantLoginAdapter so each request gets a
+// tenant-scoped *iam.Service with a NewTenantLockouts(pool, tenant.ID)
+// adapter wired in — that is the only iam.Service method that touches
+// the lockout port, so per-request allocation is necessary.
+//
+// Logout and ValidateSession build a fresh, lockout-free
+// *iam.Service literal: both methods take tenantID as an explicit
+// argument and never call into iam/ratelimit.Lockouts, so they share
+// a global wiring without any per-tenant construction cost.
+type tenantIAMAdapter struct {
+	deps *deps
+}
+
+// Login forwards to tenantLoginAdapter so the per-request lockout
+// adapter is wired in. The closure capture pattern means each call
+// re-resolves the tenant from context (the chi router runs
+// TenantScope first, so it is always populated when we reach here).
+func (a tenantIAMAdapter) Login(ctx context.Context, host, email, password string, ip net.IP, ua string) (iam.Session, error) {
+	return tenantLoginAdapter(a.deps)(ctx, host, email, password, ip, ua)
+}
+
+// Logout / ValidateSession do not need Lockouts — tenantID flows in
+// as an explicit argument. We construct a minimal Service per call
+// (the alternative is caching one in deps; the cost is identical
+// because *iam.Service is a struct of interface pointers).
+func (a tenantIAMAdapter) Logout(ctx context.Context, tenantID, sessionID uuid.UUID) error {
+	return a.lockoutFreeService().Logout(ctx, tenantID, sessionID)
+}
+
+func (a tenantIAMAdapter) ValidateSession(ctx context.Context, tenantID, sessionID uuid.UUID) (iam.Session, error) {
+	return a.lockoutFreeService().ValidateSession(ctx, tenantID, sessionID)
+}
+
+func (a tenantIAMAdapter) lockoutFreeService() *iam.Service {
+	return &iam.Service{
+		Tenants:  iamTenantResolver{inner: a.deps.tenants},
+		Users:    a.deps.users,
+		Sessions: a.deps.sessions,
+		Logger:   a.deps.logger,
+	}
 }
 
 // tenantLoginAdapter returns the LoginFunc the loginhandler consumes.
