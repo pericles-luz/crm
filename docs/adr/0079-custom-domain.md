@@ -181,6 +181,55 @@ only `/health`. No data migration; quota state ages out on its TTLs.
   (observe, don't block; bumping to a hard requirement waits for
   customer education).
 
+## HTTP wiring (SIN-62331 F51)
+
+A independent re-review do bundle F43–F49 ([SIN-62328](/SIN/issues/SIN-62328))
+constatou que o domínio do `slugreservation` (F46 / OWASP A01) só
+defende em runtime se a boundary HTTP chamar suas três peças.
+SIN-62331 fechou esse gap em `cmd/server/slugreservation_wire.go`:
+
+- **`buildSlugReservationWiring(ctx, getenv)`** instancia
+  `slugreservation.Service` apoiado em `pgstore.NewSlugReservationStore`
+  + `pgstore.NewSlugRedirectStore` quando `DATABASE_URL` está setado, e
+  devolve no-ops caso contrário. O modo no-op deixa o middleware
+  passar tudo (a regra de produção é não habilitar signup sem banco).
+- **`registerSlugReservationRoutes`** monta:
+  - `POST /api/master/slug-reservations/{slug}/release` — `OverrideHandler`
+    embrulhado em `masterAuthMiddleware`, **deny-by-default** quando
+    `MASTER_API_TOKEN` está vazio (responde 401). Quando configurado,
+    valida `Authorization: Bearer <token>` em tempo constante via
+    `crypto/subtle.ConstantTimeCompare`. O master ID é derivado por
+    UUIDv5 estável, e a flag MFA cai para `true` quando o token está
+    setado (ou `MASTER_REQUIRE_MFA=1` o impõe). SIN-62342 substitui
+    esse middleware pelo `RequireMasterMFA` real.
+  - `POST /signup` e `PATCH /tenants/{slug}/slug` — placeholders 501
+    embrulhados em `RequireSlugAvailable`, de forma que o curto-circuito
+    409 do F46 já dispara antes que o handler real (em outro ticket)
+    pouse.
+- **`slugWiring.redirect(...)`** é aplicado em `runWith` por fora do
+  `csp.Middleware` para que toda request com Host `<old>.<primary>`
+  responda **301 + `Clear-Site-Data: "cookies"`** antes de qualquer
+  rota normal. `primaryHost` é lido de `PRIMARY_DOMAIN` (default
+  `exemplo.com`).
+
+**Smoke tests** em `cmd/server/slugreservation_wire_test.go`:
+
+- 409 em `/signup` quando o slug está em reserva ativa.
+- 501 (placeholder) em `/signup` quando o slug está livre — prova que o
+  middleware passou.
+- 409 em `PATCH /tenants/{slug}/slug` para slug reservado.
+- 401 em `POST /api/master/slug-reservations/{slug}/release` sem token.
+- 401 quando o bearer é diferente do `MASTER_API_TOKEN`.
+- Auth passa quando bearer bate; OverrideHandler executa.
+- Redirect 301 + `Clear-Site-Data` para Host `<old>.exemplo.com`.
+- Pass-through quando Host = primary ou Host = subdomínio aninhado.
+
+**Reversibility.** Desconfigurar `DATABASE_URL` zera o wire-up
+(o middleware vira no-op, override fica nil) — a boundary não
+serve signup/rename sem banco. Para retirar o master mux, basta
+deixar `MASTER_API_TOKEN` vazio: o handler permanece montado mas
+responde 401 a todas as requests (deny-by-default).
+
 ## Out of scope
 
 - The `/internal/tls/ask` Caddy on-demand handler ([SIN-62243](/SIN/issues/SIN-62243)).

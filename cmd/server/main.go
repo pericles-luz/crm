@@ -49,6 +49,11 @@ const (
 	envHTTPAddr     = "HTTP_ADDR"
 	envInternalAddr = "INTERNAL_HTTP_ADDR"
 	envRedisURL     = "REDIS_URL"
+
+	// PrimaryDomain governs which host the SIN-62331 RedirectHandler
+	// wraps the public mux around. Re-uses customdomain_wire's env so
+	// both bundles see the same primary apex; default lives in
+	// slugreservation_wire.
 )
 
 func main() {
@@ -89,6 +94,20 @@ func executeAllWith(ctx context.Context, getenv func(string) string, dial dialFn
 	internalHandler, internalCleanup := buildInternalHandlerWith(ctx, getenv, dial)
 	defer internalCleanup()
 
+	// SIN-62331 F51 — cookieless static origin (F49). Wired only when
+	// STATIC_HTTP_ADDR is set so cmd/server tests / smoke runs without
+	// the env stay on the public+internal listener pair.
+	staticAddr := getenv(envStaticOriginAddr)
+	var staticHandler http.Handler
+	if staticAddr != "" {
+		h, err := buildMediaServeHandler()
+		if err != nil {
+			log.Printf("crm: static origin disabled — %v", err)
+		} else {
+			staticHandler = h
+		}
+	}
+
 	var (
 		wg       sync.WaitGroup
 		errMu    sync.Mutex
@@ -115,6 +134,15 @@ func executeAllWith(ctx context.Context, getenv func(string) string, dial dialFn
 			defer wg.Done()
 			if err := runInternal(ctx, internalAddr, internalHandler); err != nil {
 				collectErr(fmt.Errorf("internal listener: %w", err))
+			}
+		}()
+	}
+	if staticHandler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runStaticOrigin(ctx, staticAddr, staticHandler); err != nil {
+				collectErr(fmt.Errorf("static origin listener: %w", err))
 			}
 		}()
 	}
@@ -148,6 +176,17 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 		log.Printf("crm: webhook intake mounted on public listener")
 	}
 
+	// SIN-62331 F51 — slug reservation wiring. Mount the master
+	// override route, the signup + tenant-rename placeholders guarded
+	// by RequireSlugAvailable, and the upload pipeline. The redirect
+	// handler is applied later as a host-level prefilter so it fires
+	// for every request that arrives with `<old>.<primary>` in Host.
+	slugWiring := buildSlugReservationWiring(ctx, getenv)
+	defer slugWiring.cleanup()
+	registerSlugReservationRoutes(mux, slugWiring, getenv)
+	registerUploadRoutes(mux)
+	log.Printf("crm: slug reservation + upload routes mounted on public listener")
+
 	// SIN-62334 F53: hard-fail boot when CUSTOM_DOMAIN_UI_ENABLED=1 and
 	// REDIS_URL is unset. Returning the error from runWith propagates to
 	// main(), which exits non-zero — the orchestrator restarts and the
@@ -171,7 +210,13 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 	// intentionally NOT here"). The middleware wraps the entire public
 	// mux so static assets, HTMX fragments, and full-page renders all
 	// inherit the policy.
-	publicHandler := csp.Middleware(mux)
+	//
+	// SIN-62331 F51 — the slug RedirectHandler wraps the post-CSP
+	// handler so a request whose Host is `<old>.<primary>` is answered
+	// with 301 + Clear-Site-Data BEFORE any normal route runs. The
+	// handler delegates to the inner mux on miss so /health, the
+	// custom-domain UI, and webhook intake stay reachable.
+	publicHandler := slugWiring.redirect(csp.Middleware(mux))
 
 	srv := &http.Server{
 		Addr:              addr,
