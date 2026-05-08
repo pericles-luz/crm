@@ -2,13 +2,18 @@ package iam
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/pericles-luz/crm/internal/iam/ratelimit"
 )
 
 // TenantResolver resolves a request host (e.g. "acme.crm.local") to the
@@ -74,6 +79,39 @@ type Service struct {
 	// It NEVER logs email, password, or password_hash — see
 	// docs/security/passwords.md for the full no-log policy.
 	Logger *slog.Logger
+
+	// Lockouts is the durable account-lockout port (SIN-62341, ADR 0073
+	// §D4). Pre-checked BEFORE VerifyPassword: if the principal has an
+	// active account_lockout row, Login returns ErrAccountLocked
+	// immediately without touching the password hash. Nil disables the
+	// lockout flow entirely — existing tests that construct a bare
+	// Service literal continue to work.
+	Lockouts ratelimit.Lockouts
+
+	// Limiter is the failure counter for the SIN-62341 lockout policy.
+	// Each VerifyPassword(false) records a hit in the
+	// "failed_login:email:<sha256(email)>" sliding-window bucket; when
+	// LoginPolicy.Lockout.Threshold is exceeded the lockout row is
+	// written and Login returns ErrAccountLocked. Nil disables the
+	// counter (no lockout writes); the IsLocked pre-check still runs if
+	// Lockouts is wired.
+	Limiter ratelimit.RateLimiter
+
+	// LoginPolicy carries the threshold + duration + alert flag the
+	// failure-counter / lockout flow consults. Zero (the natural value)
+	// disables the lockout writes; existing tests need not set it.
+	// Master logins use a separate Service with a Policy whose
+	// AlertOnLock is true so the synchronous Slack notification fires
+	// (acceptance criterion #3).
+	LoginPolicy ratelimit.Policy
+
+	// Alerter is the synchronous notification port. Wired only on the
+	// master Service; tenant Service leaves it nil. When the lockout
+	// trips and LoginPolicy.Lockout.AlertOnLock is true, Login calls
+	// Notify before returning. A non-nil Alerter error is logged but
+	// does NOT abort the lockout — the persisted account_lockout row
+	// is the authoritative penalty.
+	Alerter ratelimit.Alerter
 }
 
 // dummyHash is a precomputed argon2id hash used to make the latency of
@@ -150,10 +188,61 @@ func (s *Service) Login(ctx context.Context, host, email, password string, ipAdd
 		return Session{}, ErrInvalidCredentials
 	}
 
+	// Pre-check the durable lockout BEFORE running VerifyPassword. The
+	// SIN-62341 contract is "lockout vence o counter" — once the
+	// account_lockout row exists, no password verification happens, so
+	// a Redis flush cannot reset the penalty (AC #2). Order matters:
+	// the IsLocked branch runs only after the user-found check above,
+	// so unknown emails never reach this path and cannot enumerate
+	// which accounts have locked siblings.
+	if s.Lockouts != nil {
+		locked, until, err := s.Lockouts.IsLocked(ctx, userID)
+		if err != nil {
+			return Session{}, fmt.Errorf("iam: lockout pre-check: %w", err)
+		}
+		if locked {
+			// Run a dummy VerifyPassword anyway so the wall-clock cost
+			// of the locked branch is indistinguishable from the
+			// verify-then-fail branch. Without it an attacker timing
+			// the response could distinguish "locked" from "wrong
+			// password" and learn that an account is in lockout state
+			// (AC #4 timing window applies here too).
+			_, _ = VerifyPassword(password, dummyHash)
+			logger.WarnContext(ctx, "login: rejected",
+				slog.String("reason", "account_locked"),
+				slog.String("tenant_id", tenantID.String()),
+				slog.Time("locked_until", until),
+			)
+			return Session{}, ErrAccountLocked
+		}
+	}
+
 	ok, err := VerifyPassword(password, encoded)
 	if err != nil || !ok {
+		// Failed verify: record the hit in the sliding-window failure
+		// counter. If the threshold is exceeded, write the durable
+		// lockout row and (for master endpoints) fire the synchronous
+		// alert. The user still sees ErrAccountLocked on the
+		// trip-attempt because the persisted row is the truth source.
+		if locked := s.recordLoginFailure(ctx, tenantID, userID, email); locked {
+			return Session{}, ErrAccountLocked
+		}
 		logger.WarnContext(ctx, "login: rejected", slog.String("reason", "invalid_credentials"), slog.String("tenant_id", tenantID.String()))
 		return Session{}, ErrInvalidCredentials
+	}
+
+	// Successful verify: best-effort lockout reset. Clear is idempotent
+	// (no-op when no row exists) so the call is unconditional. A Clear
+	// failure does NOT abort the login: the user has authenticated
+	// successfully and the lockout row, if any, is stale by definition.
+	if s.Lockouts != nil {
+		if err := s.Lockouts.Clear(ctx, userID); err != nil {
+			logger.WarnContext(ctx, "login: clear lockout failed",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("user_id", userID.String()),
+				slog.String("err", err.Error()),
+			)
+		}
 	}
 
 	id, err := NewSessionID()
@@ -246,4 +335,93 @@ var ErrTenantNotFound = errors.New("iam: tenant not found")
 
 func isLookupNotFound(err error) bool {
 	return errors.Is(err, ErrTenantNotFound)
+}
+
+// failedLoginKey returns the Redis sliding-window bucket key for a
+// failed-login event. The email is sha256-hashed so PII never lands
+// in the limiter logs / metric labels — the only place the plain
+// email can appear is the WARN log line, which the logger config
+// controls. lower-trim normalises "Alice@x" and "alice@x" onto the
+// same counter so trivial casing variants cannot bypass the lockout.
+func failedLoginKey(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return "failed_login:email:" + hex.EncodeToString(sum[:])
+}
+
+// recordLoginFailure increments the sliding-window failure counter
+// for email and, when the policy threshold is exceeded, writes the
+// durable account_lockout row and fires the synchronous Slack alert
+// for master endpoints. Returns true if the call resulted in a
+// lockout being written for the current attempt — the caller uses
+// this to decide between ErrAccountLocked and ErrInvalidCredentials.
+//
+// Failure paths are intentionally swallowed (with a WARN log): a
+// Limiter outage MUST NOT make every login look like a 401 to the
+// user, and a Lockouts write-failure does not change the credential
+// verdict for the current attempt.
+func (s *Service) recordLoginFailure(ctx context.Context, tenantID, userID uuid.UUID, email string) bool {
+	logger := s.logger()
+	if s.Limiter == nil || !s.LoginPolicy.LockoutEnabled() {
+		return false
+	}
+	allowed, _, err := s.Limiter.Allow(
+		ctx,
+		failedLoginKey(email),
+		s.LoginPolicy.Lockout.Duration,
+		s.LoginPolicy.Lockout.Threshold,
+	)
+	if err != nil {
+		logger.WarnContext(ctx, "login: failure-counter error",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("err", err.Error()),
+		)
+		return false
+	}
+	if allowed {
+		return false
+	}
+	// Threshold tripped. Write the durable lockout row.
+	if s.Lockouts == nil {
+		// Counter trip but no Lockouts wired — return false so the
+		// caller still emits the standard ErrInvalidCredentials. This
+		// matches the "Lockouts nil disables the lockout flow" rule
+		// documented on Service.Lockouts.
+		return false
+	}
+	until := s.now().Add(s.LoginPolicy.Lockout.Duration)
+	reason := fmt.Sprintf("ratelimit: %d failed login attempts", s.LoginPolicy.Lockout.Threshold)
+	if err := s.Lockouts.Lock(ctx, userID, until, reason); err != nil {
+		logger.WarnContext(ctx, "login: write lockout failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("user_id", userID.String()),
+			slog.String("err", err.Error()),
+		)
+		// Lock write failed; still treat the attempt as a normal
+		// credential rejection so the response stays uniform. A
+		// retry on the next attempt will re-trip the threshold and
+		// try the write again.
+		return false
+	}
+	logger.WarnContext(ctx, "login: locked",
+		slog.String("tenant_id", tenantID.String()),
+		slog.String("user_id", userID.String()),
+		slog.Time("locked_until", until),
+		slog.String("reason", reason),
+	)
+	if s.Alerter != nil && s.LoginPolicy.Lockout.AlertOnLock {
+		// Synchronous notify (acceptance criterion #3). The Slack
+		// adapter caps the round-trip with its own per-call deadline,
+		// so a slow webhook does not stall the login response.
+		if err := s.Alerter.Notify(ctx, fmt.Sprintf(
+			"account locked: policy=%s user=%s tenant=%s until=%s",
+			s.LoginPolicy.Name, userID, tenantID, until.UTC().Format(time.RFC3339),
+		)); err != nil {
+			logger.WarnContext(ctx, "login: alerter notify failed",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("user_id", userID.String()),
+				slog.String("err", err.Error()),
+			)
+		}
+	}
+	return true
 }
