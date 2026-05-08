@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/pericles-luz/crm/internal/iam/password"
 	"github.com/pericles-luz/crm/internal/iam/ratelimit"
 )
 
@@ -68,6 +69,27 @@ type Service struct {
 	Users    UserCredentialReader
 	Sessions SessionStore
 	TTL      time.Duration
+
+	// PasswordVerifier is the ADR 0070 verifier used by Login to match
+	// plaintext against user.password_hash. When nil, Login falls back to
+	// the legacy iam.VerifyPassword path so existing tests/wirings keep
+	// working transparently. New deploys MUST set this to password.Default()
+	// so the §3 needsRehash signal feeds the quiet-upgrade path.
+	PasswordVerifier password.Verifier
+
+	// PasswordHasher derives the new encoded form when Login receives
+	// needsRehash=true (and for Service.SetPassword). nil disables the
+	// re-hash path; verification still works via PasswordVerifier.
+	PasswordHasher password.Hasher
+
+	// PasswordPolicy gates SetPassword (ADR 0070 §5). nil disables
+	// SetPassword; Login does not touch it.
+	PasswordPolicy password.PolicyChecker
+
+	// PasswordWriter persists a freshly-encoded password_hash for both the
+	// Login re-hash flow and SetPassword. nil disables both write paths;
+	// Login's rehash failure is non-fatal and only logged.
+	PasswordWriter UserPasswordWriter
 
 	// Now is the clock source. nil falls back to time.Now. Tests inject a
 	// frozen clock to assert expiry boundaries deterministically.
@@ -167,7 +189,7 @@ func (s *Service) Login(ctx context.Context, host, email, password string, ipAdd
 			// Verifying the supplied password against dummyHash here
 			// equalises wall-clock cost across all credential-mismatch
 			// branches. See docs/security/passwords.md.
-			_, _ = VerifyPassword(password, dummyHash)
+			s.dummyVerify(password)
 			logger.WarnContext(ctx, "login: host did not resolve to a tenant", slog.String("reason", "invalid_credentials"))
 			return Session{}, ErrInvalidCredentials
 		}
@@ -183,7 +205,7 @@ func (s *Service) Login(ctx context.Context, host, email, password string, ipAdd
 	// against dummyHash so the wall-clock cost is the same as the
 	// verified path. The result is discarded.
 	if userID == uuid.Nil {
-		_, _ = VerifyPassword(password, dummyHash)
+		s.dummyVerify(password)
 		logger.WarnContext(ctx, "login: rejected", slog.String("reason", "invalid_credentials"), slog.String("tenant_id", tenantID.String()))
 		return Session{}, ErrInvalidCredentials
 	}
@@ -201,13 +223,14 @@ func (s *Service) Login(ctx context.Context, host, email, password string, ipAdd
 			return Session{}, fmt.Errorf("iam: lockout pre-check: %w", err)
 		}
 		if locked {
-			// Run a dummy VerifyPassword anyway so the wall-clock cost
-			// of the locked branch is indistinguishable from the
-			// verify-then-fail branch. Without it an attacker timing
-			// the response could distinguish "locked" from "wrong
-			// password" and learn that an account is in lockout state
-			// (AC #4 timing window applies here too).
-			_, _ = VerifyPassword(password, dummyHash)
+			// Run a dummy verify anyway so the wall-clock cost of the
+			// locked branch is indistinguishable from the verify-then-
+			// fail branch. Without it an attacker timing the response
+			// could distinguish "locked" from "wrong password" and
+			// learn that an account is in lockout state (AC #4 timing
+			// window applies here too). Routes through dummyVerify so
+			// the ADR 0070 verifier is exercised when wired.
+			s.dummyVerify(password)
 			logger.WarnContext(ctx, "login: rejected",
 				slog.String("reason", "account_locked"),
 				slog.String("tenant_id", tenantID.String()),
@@ -217,7 +240,7 @@ func (s *Service) Login(ctx context.Context, host, email, password string, ipAdd
 		}
 	}
 
-	ok, err := VerifyPassword(password, encoded)
+	ok, needsRehash, err := s.verifyPassword(encoded, password)
 	if err != nil || !ok {
 		// Failed verify: record the hit in the sliding-window failure
 		// counter. If the threshold is exceeded, write the durable
@@ -275,7 +298,82 @@ func (s *Service) Login(ctx context.Context, host, email, password string, ipAdd
 		slog.String("user_id", userID.String()),
 		slog.String("session_id_prefix", sess.ID.String()[:8]),
 	)
+
+	// ADR 0070 §3 — re-hash on parameter change. The rehash MUST NOT
+	// fail the login: it runs in a separate goroutine with a fresh
+	// context (so client cancellation does not abort the upgrade) and
+	// any failure is logged at WARN, not returned. The plaintext
+	// captured by the closure is no shorter-lived than the request that
+	// already had it in memory.
+	if needsRehash {
+		s.scheduleRehash(tenantID, userID, password)
+	}
 	return sess, nil
+}
+
+// verifyPassword routes through the new password.Verifier when configured
+// (§3 needsRehash signal flows out the boolean), and falls back to the
+// legacy VerifyPassword helper otherwise so existing test wirings keep
+// working without modification.
+func (s *Service) verifyPassword(stored, plain string) (bool, bool, error) {
+	if s.PasswordVerifier != nil {
+		return s.PasswordVerifier.Verify(stored, plain)
+	}
+	ok, err := VerifyPassword(plain, stored)
+	return ok, false, err
+}
+
+// dummyVerify burns a single argon2id derivation against dummyHash so the
+// wall-clock latency of the not-found / wrong-host paths matches the
+// verified path. Result is discarded; needsRehash on the dummy is
+// meaningless. Routes through PasswordVerifier when wired so a deploy on
+// the new helper does not silently fall back to legacy params on the
+// dummy path either.
+func (s *Service) dummyVerify(plain string) {
+	if s.PasswordVerifier != nil {
+		_, _, _ = s.PasswordVerifier.Verify(dummyHash, plain)
+		return
+	}
+	_, _ = VerifyPassword(plain, dummyHash)
+}
+
+// scheduleRehash kicks off the async re-hash + write per ADR 0070 §3.
+// Returns immediately so login latency is unaffected. nil PasswordHasher
+// or PasswordWriter disables the rehash silently — the row stays on its
+// older params and the next successful login retries.
+func (s *Service) scheduleRehash(tenantID, userID uuid.UUID, plain string) {
+	if s.PasswordHasher == nil || s.PasswordWriter == nil {
+		return
+	}
+	logger := s.logger()
+	go func() {
+		// Detached context with a generous bound — DB latency must not
+		// hang the goroutine forever, but the request's own context may
+		// already be cancelled by the time this runs.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		encoded, err := s.PasswordHasher.Hash(plain)
+		if err != nil {
+			logger.WarnContext(ctx, "login: rehash compute failed",
+				slog.String("user_id", userID.String()),
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("err", err.Error()),
+			)
+			return
+		}
+		if err := s.PasswordWriter.UpdatePasswordHash(ctx, tenantID, userID, encoded); err != nil {
+			logger.WarnContext(ctx, "login: rehash write failed",
+				slog.String("user_id", userID.String()),
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("err", err.Error()),
+			)
+			return
+		}
+		logger.InfoContext(ctx, "login: rehash ok",
+			slog.String("user_id", userID.String()),
+			slog.String("tenant_id", tenantID.String()),
+		)
+	}()
 }
 
 // Logout deletes the session row, scoped to the resolved tenant. A delete
