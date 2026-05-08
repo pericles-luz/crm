@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/pericles-luz/crm/internal/adapter/httpapi/loginhandler"
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/middleware"
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/views"
 	"github.com/pericles-luz/crm/internal/iam"
@@ -80,7 +82,11 @@ func LoginPost(cfg LoginConfig) http.HandlerFunc {
 				renderLoginError(w, next)
 				return
 			}
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			// *iam.AccountLockedError → 429 + Retry-After; any other
+			// non-credential error → 500. Both go through the SIN-62348
+			// translator so the lockout response surface stays in one
+			// place (Retry-After header, fragment body).
+			loginhandler.WriteLoginError(w, r, err, slog.Default())
 			return
 		}
 		http.SetCookie(w, &http.Cookie{

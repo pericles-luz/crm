@@ -260,6 +260,38 @@ func TestLoginPost_InfraError_500(t *testing.T) {
 	}
 }
 
+// TestLoginPost_AccountLocked_ReturnsRetryAfter is the SIN-62217 ↔ SIN-62348
+// integration check: when iam.Service.Login returns *iam.AccountLockedError
+// the handler must surface 429 + Retry-After (delta-seconds, rounded up).
+// The translation is delegated to loginhandler.WriteLoginError so the
+// fragment body and header arithmetic stay in one place across handlers.
+func TestLoginPost_AccountLocked_ReturnsRetryAfter(t *testing.T) {
+	t.Parallel()
+	until := time.Now().Add(75 * time.Second)
+	iamFake := &fakeIAM{loginErr: iam.NewAccountLockedError(until)}
+	form := url.Values{}
+	form.Set("email", "victim@acme.test")
+	form.Set("password", "irrelevant")
+	r := tenantedRequest(t, http.MethodPost, "/login", strings.NewReader(form.Encode()), &tenancy.Tenant{ID: uuid.New()})
+	rec := httptest.NewRecorder()
+	handler.LoginPost(handler.LoginConfig{IAM: iamFake})(rec, r)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429", rec.Code)
+	}
+	got := rec.Header().Get("Retry-After")
+	if got == "" {
+		t.Fatal("Retry-After header missing")
+	}
+	// rounded up; for 75s, header must be >= 1 and <= 76 (ceil semantics
+	// + 1s minimum) with realistic clock skew on slow CI.
+	if got != "75" && got != "76" {
+		t.Fatalf("Retry-After=%q, want 75 or 76", got)
+	}
+	if cookies := rec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("got %d cookies on lockout, want 0", len(cookies))
+	}
+}
+
 func TestLoginPost_PanicsOnNilAuthenticator(t *testing.T) {
 	t.Parallel()
 	defer func() {
