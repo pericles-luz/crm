@@ -47,4 +47,11 @@ jobs:
           MINIO_ROOT_PASSWORD: ci-placeholder
           ACME_EMAIL: ci@example.com
           STG_TENANT_HOSTS: ci.example.com
-        run: docker compose -f deploy/compose/compose.stg.yml config >/dev/null
+        # Compose validates `env_file: .env.stg` at config time. In prod that
+        # file is written into /opt/crm/stg/ by cd-stg.yml before `compose up`;
+        # in CI it never exists, so seed an empty placeholder for validation.
+        # Cleaned up so the workspace stays pristine for any later step.
+        run: |
+          touch deploy/compose/.env.stg
+          docker compose -f deploy/compose/compose.stg.yml config >/dev/null
+          rm -f deploy/compose/.env.stg
