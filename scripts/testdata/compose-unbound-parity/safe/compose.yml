@@ -1,0 +1,14 @@
+# Fixture: parity NOT required — the active Caddyfile has no
+# on_demand_tls catch-all, so the lint must exit 0 even without
+# the unbound sidecar.
+name: safe-fixture
+
+services:
+  app:
+    image: alpine:3.20
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./caddy:/etc/caddy:ro
+    depends_on: [app]

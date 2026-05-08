@@ -1,0 +1,57 @@
+# SIN-62332 / ADR 0079 §2 deploy gate.
+#
+# Asserts every compose YAML in deploy/compose/ that references a
+# Caddyfile with `on_demand_tls` (custom-domain catch-all) ALSO brings
+# up the Unbound sidecar AND pins Caddy's container DNS to it. Without
+# this parity, F44 (DNS rebinding via ACME HTTP-01 challenge name) is
+# re-exploitable the moment someone flips on the catch-all.
+#
+# The lint runs over the real compose files AND a small set of
+# synthetic fixtures (good + malformed) so a future regression in the
+# lint itself is caught alongside a regression in the composes.
+name: compose-unbound-parity
+
+on:
+  pull_request:
+    paths:
+      - "deploy/compose/**"
+      - "deploy/caddy/**"
+      - "infra/caddy/**"
+      - "scripts/check-compose-unbound-parity.sh"
+      - "scripts/check-compose-unbound-parity.test.sh"
+      - "scripts/testdata/compose-unbound-parity/**"
+      - ".github/workflows/compose-unbound-parity.yml"
+  push:
+    branches: [main]
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: lint real compose files
+        run: bash scripts/check-compose-unbound-parity.sh
+
+      - name: fixture-driven self-test (good + malformed)
+        run: bash scripts/check-compose-unbound-parity.test.sh
+
+      - name: docker compose config — compose.stg.yml
+        env:
+          # Placeholders so the ${VAR:?…} guards in compose.stg.yml resolve;
+          # `docker compose config` only validates the YAML + interpolation
+          # and never tries to pull the image, so any non-empty value works.
+          APP_IMAGE: ghcr.io/pericles-luz/crm@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          POSTGRES_PASSWORD: ci-placeholder
+          MINIO_ROOT_USER: ci-placeholder
+          MINIO_ROOT_PASSWORD: ci-placeholder
+          ACME_EMAIL: ci@example.com
+          STG_TENANT_HOSTS: ci.example.com
+        # Compose validates `env_file: .env.stg` at config time. In prod that
+        # file is written into /opt/crm/stg/ by cd-stg.yml before `compose up`;
+        # in CI it never exists, so seed an empty placeholder for validation.
+        # Cleaned up so the workspace stays pristine for any later step.
+        run: |
+          touch deploy/compose/.env.stg
+          docker compose -f deploy/compose/compose.stg.yml config >/dev/null
+          rm -f deploy/compose/.env.stg

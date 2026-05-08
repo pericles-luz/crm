@@ -1,0 +1,9 @@
+# Fixture: literal-host Caddyfile — no on_demand_tls catch-all.
+{
+	auto_https off
+	admin off
+}
+
+acme.example.com {
+	reverse_proxy app:8080
+}

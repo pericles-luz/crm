@@ -1,0 +1,21 @@
+# Fixture: unbound sidecar IS present but caddy lacks `dns: ["unbound"]`.
+# Without the resolver pin Caddy still uses the host /etc/resolv.conf for
+# HTTP-01 challenge name resolution — F44 stays open. Lint must exit 1.
+name: missing-dns-fixture
+
+services:
+  app:
+    image: alpine:3.20
+
+  unbound:
+    image: mvance/unbound:1.22.0
+    volumes:
+      - ./caddy/unbound.conf:/opt/unbound/etc/unbound/a-records.conf:ro
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./caddy:/etc/caddy:ro
+    depends_on:
+      app: { condition: service_started }
+      unbound: { condition: service_started }

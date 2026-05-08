@@ -106,11 +106,39 @@ services:
       nats: { condition: service_healthy }
       minio: { condition: service_healthy }
 
+  # SIN-62332 / ADR 0079 §2 — Unbound sidecar parity with the local-dev
+  # compose. Today Caddyfile.stg only serves literal $STG_TENANT_HOSTS
+  # (no on_demand_tls catch-all) so the F44 DNS-rebinding surface is
+  # closed by configuration. The sidecar is wired up regardless so that
+  # turning on the custom-domain catch-all in stg cannot, by itself,
+  # re-open the F44 attack class — parity is a deploy gate before any
+  # `:443` catch-all flip in stg/prod (see docs/deploy/staging.md
+  # §"Custom-domain catch-all (F44 / Unbound) deploy gate"). The active
+  # gate is enforced by scripts/check-compose-unbound-parity.sh.
+  unbound:
+    image: mvance/unbound:1.22.0@sha256:76906da36d1806f3387338f15dcf8b357c51ce6897fb6450d6ce010460927e90
+    restart: unless-stopped
+    networks: [crm]
+    volumes:
+      # On the VPS the operator scps infra/caddy/unbound.conf alongside
+      # the Caddyfile into /opt/crm/stg/caddy/ (see staging.md §4), so
+      # the same `./caddy` mount surface is reused and the bind path
+      # below resolves to /opt/crm/stg/caddy/unbound.conf.
+      - ./caddy/unbound.conf:/opt/unbound/etc/unbound/a-records.conf:ro
+    healthcheck:
+      <<: *hd
+      test: ["CMD", "drill", "@127.0.0.1", "-p", "5353", "example.com"]
+
   caddy:
     image: caddy:2.8.4-alpine3.20@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     restart: unless-stopped
     networks: [crm]
     ports: ["80:80", "443:443"]
+    # ADR 0079 §2 (SIN-62242 / SIN-62332): pin Caddy's container resolver
+    # to the Unbound sidecar so HTTP-01 challenge name resolution (which
+    # rides /etc/resolv.conf, NOT Caddy's `tls.resolvers` block) cannot
+    # be redirected to a private/loopback IP via DNS rebinding.
+    dns: ["unbound"]
     # Override Caddy's default `--config /etc/caddy/Caddyfile` so the local-dev
     # Caddyfile (auto_https off, *.crm.local) doesn't get used in stg. The stg
     # variant turns auto_https back on and picks site addresses from
@@ -134,4 +162,6 @@ services:
       - ./caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
-    depends_on: [app]
+    depends_on:
+      app: { condition: service_started }
+      unbound: { condition: service_started }
