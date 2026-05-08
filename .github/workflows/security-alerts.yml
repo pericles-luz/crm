@@ -1,6 +1,22 @@
 # Hard-fail PRs (and emit a daily report) when GitHub Dependabot has any
 # open vulnerability alert with severity >= high.
 # See docs/adr/0084-supply-chain.md (SIN-62247).
+#
+# Token requirement (SIN-62346): GitHub Actions' default GITHUB_TOKEN
+# CANNOT call /repos/:owner/:repo/dependabot/alerts even when the workflow
+# declares `permissions: security-events: read`. The Dependabot alerts API
+# requires either the classic `security_events`/`repo` PAT scope or a
+# fine-grained PAT with `Dependabot alerts: Read` — neither is granted to
+# the workflow GITHUB_TOKEN. With only GITHUB_TOKEN, the API returns
+# `Resource not accessible by integration (HTTP 403)` and the gate
+# fails-closed (per ADR 0084 §4) but with a misleading "token permissions"
+# error.
+#
+# Operator action: configure a fine-grained PAT scoped to this repo with
+# `Dependabot alerts: Read` and store it as the `DEPENDABOT_ALERTS_PAT`
+# repo secret. The workflow prefers that secret and falls back to
+# GITHUB_TOKEN, which lets the failure path emit an actionable error
+# rather than a vague 403.
 
 name: security-alerts
 
@@ -22,17 +38,23 @@ jobs:
     steps:
       - name: Query Dependabot alerts
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer the PAT (required for the Dependabot alerts API). Fall
+          # through to GITHUB_TOKEN so the script can detect "no PAT
+          # configured" and surface a setup-instruction error rather than
+          # a silent pass.
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_PAT || secrets.GITHUB_TOKEN }}
+          USING_PAT: ${{ secrets.DEPENDABOT_ALERTS_PAT != '' }}
         run: |
           set -euo pipefail
 
-          # Pull all open Dependabot alerts. Requires the workflow's
-          # ${{ secrets.GITHUB_TOKEN }} to have `security_events: read` AND
-          # Dependabot alerts to be enabled under Settings > Code security
-          # and analysis. The latter is a per-repo toggle; without it the
-          # API returns 403 ("Dependabot alerts are disabled for this
-          # repository.") and we fail-closed with an actionable message
-          # rather than silently passing.
+          # Pull all open Dependabot alerts. Requires either:
+          #   (a) the classic `security_events` PAT scope, or
+          #   (b) a fine-grained PAT with `Dependabot alerts: Read`,
+          # AND Dependabot alerts enabled under Settings > Code security
+          # and analysis. Without Dependabot enabled the API returns 403
+          # ("Dependabot alerts are disabled for this repository.") and we
+          # fail-closed with an actionable message rather than silently
+          # passing.
           set +e
           gh api \
             -H "Accept: application/vnd.github+json" \
@@ -43,12 +65,19 @@ jobs:
           set -e
 
           if [ "${status}" -ne 0 ]; then
+            cat alerts.err >&2
             if grep -q "Dependabot alerts are disabled" alerts.err; then
-              cat alerts.err >&2
               echo "::error::Dependabot alerts are disabled for ${GITHUB_REPOSITORY}. Enable them under Settings → Code security and analysis (ADR 0084 §4 — required for the supply-chain baseline)."
               exit 1
             fi
-            cat alerts.err >&2
+            if grep -qi "Resource not accessible" alerts.err; then
+              if [ "${USING_PAT}" = "true" ]; then
+                echo "::error::DEPENDABOT_ALERTS_PAT cannot read /dependabot/alerts on ${GITHUB_REPOSITORY}. Mint a fine-grained PAT scoped to this repo with 'Dependabot alerts: Read' (or a classic PAT with the 'security_events' scope) and re-add it as the DEPENDABOT_ALERTS_PAT secret. See ADR 0084 §4 (SIN-62247) and SIN-62346."
+              else
+                echo "::error::GITHUB_TOKEN cannot read /dependabot/alerts (GitHub limitation; the workflow GITHUB_TOKEN does not grant Dependabot-alerts read access regardless of 'permissions: security-events: read'). Configure a 'DEPENDABOT_ALERTS_PAT' repo secret holding a fine-grained PAT scoped to ${GITHUB_REPOSITORY} with 'Dependabot alerts: Read'. See ADR 0084 §4 (SIN-62247) and SIN-62346."
+              fi
+              exit 1
+            fi
             echo "::error::Could not list Dependabot alerts (gh api exit ${status}). Check token permissions and API status."
             exit 1
           fi
