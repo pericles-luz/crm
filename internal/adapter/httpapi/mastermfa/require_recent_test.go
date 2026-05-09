@@ -14,7 +14,7 @@ import (
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/mastermfa"
 )
 
-// fakeRecentSessions scripts MasterSessionVerifiedAt for the
+// fakeRecentSessions scripts MasterSessionRecentMFA for the
 // RequireRecentMFA tests. The verifiedAt field is the value returned
 // to the middleware; err overrides it when non-nil.
 type fakeRecentSessions struct {
@@ -31,7 +31,7 @@ func (f *fakeRecentSessions) VerifiedAt(_ *http.Request) (time.Time, error) {
 	return f.verifiedAt, nil
 }
 
-func newRecentMW(sessions mastermfa.MasterSessionVerifiedAt, maxAge time.Duration, now func() time.Time) func(http.Handler) http.Handler {
+func newRecentMW(sessions mastermfa.MasterSessionRecentMFA, maxAge time.Duration, now func() time.Time) func(http.Handler) http.Handler {
 	return mastermfa.RequireRecentMFA(mastermfa.RequireRecentMFAConfig{
 		Sessions: sessions,
 		MaxAge:   maxAge,

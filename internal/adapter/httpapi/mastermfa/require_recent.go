@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-// MasterSessionVerifiedAt is the read-only slice of master session
-// storage the RequireRecentMFA middleware needs. Implementations
-// return the timestamp at which the *current* master session last
-// completed an MFA challenge; a zero time signals "never verified in
-// this session" (e.g. session created at /m/login but the user has
-// not yet submitted /m/2fa/verify).
+// MasterSessionRecentMFA is the request-scoped read-only slice of
+// master session storage the RequireRecentMFA middleware needs.
+// Implementations return the timestamp at which the *current* master
+// session last completed an MFA challenge; a zero time signals "never
+// verified in this session" (e.g. session created at /m/login but the
+// user has not yet submitted /m/2fa/verify).
 //
 // The middleware passes this value to the freshness check; it is
 // deliberately not collapsed into a bool ("verified within window")
@@ -21,24 +21,20 @@ import (
 // raw value for other policies (e.g. step-up to a stricter window for
 // a single action, ADR 0073 §D3).
 //
-// ErrSessionNotFound is the canonical sentinel for "no master session
+// The shape is request-scoped on purpose: the implementation reads
+// the master session id off the request cookie and resolves the row
+// itself, mirroring MasterSessionMFA. The id-scoped storage port lives
+// in session_store.go (mastermfa.MasterSessionVerifiedAt); a request
+// adapter wraps it so the middleware never has to plumb the cookie.
+//
+// ErrSessionNotFound (declared in session_store.go alongside the
+// id-scoped port) is the canonical sentinel for "no master session
 // is bound to this request" — the middleware treats it as a
 // not-verified path so a stale cookie redirects to /m/2fa/verify
 // rather than 500ing.
-type MasterSessionVerifiedAt interface {
+type MasterSessionRecentMFA interface {
 	VerifiedAt(r *http.Request) (time.Time, error)
 }
-
-// ErrSessionNotFound is the read-port sentinel a MasterSessionVerifiedAt
-// implementation returns when the request has no master session bound
-// (cookie absent, expired, or pointing at a deleted row). The middleware
-// treats this as a soft "not verified" signal — same redirect to the
-// verify form as a session that exists but has never completed MFA.
-//
-// Other errors propagate as 500: a transient storage failure should be
-// loud, not silently funnel users into /m/2fa/verify (which would mask
-// outages from monitoring).
-var ErrSessionNotFound = errors.New("mastermfa: master session not found")
 
 // RequireRecentMFAConfig is the constructor input.
 //
@@ -55,7 +51,7 @@ var ErrSessionNotFound = errors.New("mastermfa: master session not found")
 // Now is the clock source; nil falls back to time.Now. Tests inject
 // a frozen clock to assert the boundary deterministically.
 type RequireRecentMFAConfig struct {
-	Sessions   MasterSessionVerifiedAt
+	Sessions   MasterSessionRecentMFA
 	MaxAge     time.Duration
 	VerifyPath string
 	Logger     *slog.Logger
