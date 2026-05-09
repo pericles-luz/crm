@@ -160,6 +160,49 @@ adendo no merge da issue E.
 - Persistência (`media.content_hash`, paths, storage backend) é amarrada
   pelo handler, fora deste bundle. O módulo retorna apenas o `Result`.
 
+## HTTP wiring (SIN-62331 F51)
+
+A independent re-review do bundle F43–F49 ([SIN-62328](#)) confirmou
+que sem amarração HTTP em `cmd/server` os controles deste ADR não
+disparam em runtime. SIN-62331 fechou esse gap (OWASP A05) sem mudar
+domínio:
+
+- **Cookied app mux (listener público, default `:8080`)**:
+  - `POST /api/tenant/uploads/logo` chama `mediaUploadHandler`
+    (`cmd/server/media_wire.go`) com a `Policy` do logo (PNG/JPEG/WEBP,
+    2 MiB, 1024×1024). O handler aplica os quatro controles do §5
+    (magic-byte, formato whitelisted, decompression-bomb cap, re-encode
+    obrigatório) e devolve **200** com o hash em sucesso, **415** para
+    SVG/formato não whitelisted, **413** para excesso de tamanho ou
+    pixel-bomb, **400** para Content-Type mismatch ou decode falho.
+    Persistência permanece fora deste bundle (handler é validate-only);
+    ver SIN-62246 follow-up.
+- **Cookieless static-origin mux (listener separado, gated por
+  `STATIC_HTTP_ADDR`)**:
+  - `runStaticOrigin` em `cmd/server/media_wire.go` levanta um listener
+    dedicado quando o env está setado — mirror do padrão do listener
+    interno F45. Caddy roteia o subdomínio `static.<primary>` para
+    essa porta dentro da rede do compose; a porta não é publicada no
+    host. O handler é `mediaserve.New(...).Routes()`, que já embrulha o
+    mux em `MediaHeaders` (§6: `nosniff` + CSP `default-src 'none';
+    img-src 'self'; style-src 'unsafe-inline'` + `Cross-Origin-Resource-
+    Policy: same-origin` + `Vary: Origin`). Enquanto o adapter de
+    armazenamento real do SIN-62246 não landa, `nopMediaStorage`
+    retorna 404 — mas as headers do MediaHeaders disparam mesmo no 404,
+    de modo que um ataque que escape o re-encode ainda esbarra no CSP.
+- **Smoke tests** em `cmd/server/media_wire_test.go` cobrem upload SVG
+  (415), PNG válido (200 + hash hex 64), oversize PNG (413), GET no
+  listener estático (404 + headers do MediaHeaders presentes) e o
+  start/shutdown do listener cookieless quando `STATIC_HTTP_ADDR` está
+  setado.
+
+A amarração equivalente do F46 (slug reservation: middleware,
+RedirectHandler de `<old>.<primary>`, OverrideHandler do master mux com
+deny-by-default `MASTER_API_TOKEN`) vive em
+`cmd/server/slugreservation_wire.go` e é coberta por
+`cmd/server/slugreservation_wire_test.go`. Ver ADR 0079 §"HTTP wiring"
+para detalhes.
+
 ## Referências
 
 - F47 (HIGH): SVG e polyglot uploads — plano [SIN-62226 §5](#).
