@@ -20,14 +20,14 @@ type Action string
 // Action values for Fase 1. The list is intentionally small — new
 // actions land alongside new handlers that consume RequireAction.
 const (
-	ActionTenantContactRead     Action = "tenant.contact.read"
-	ActionTenantContactReadPII  Action = "tenant.contact.read_pii"
-	ActionTenantContactCreate   Action = "tenant.contact.create"
-	ActionTenantContactUpdate   Action = "tenant.contact.update"
-	ActionTenantContactDelete   Action = "tenant.contact.delete"
+	ActionTenantContactRead      Action = "tenant.contact.read"
+	ActionTenantContactReadPII   Action = "tenant.contact.read_pii"
+	ActionTenantContactCreate    Action = "tenant.contact.create"
+	ActionTenantContactUpdate    Action = "tenant.contact.update"
+	ActionTenantContactDelete    Action = "tenant.contact.delete"
 	ActionTenantConversationRead Action = "tenant.conversation.read"
-	ActionTenantMessageSend     Action = "tenant.message.send"
-	ActionTenantMessageRead     Action = "tenant.message.read"
+	ActionTenantMessageSend      Action = "tenant.message.send"
+	ActionTenantMessageRead      Action = "tenant.message.read"
 
 	ActionMasterTenantCreate      Action = "master.tenant.create"
 	ActionMasterTenantRead        Action = "master.tenant.read"
@@ -43,13 +43,13 @@ const (
 type ReasonCode string
 
 const (
-	ReasonAllowedRBAC              ReasonCode = "allowed_rbac"
-	ReasonAllowedMaster            ReasonCode = "allowed_master"
-	ReasonDeniedNoPrincipal        ReasonCode = "denied_no_principal"
-	ReasonDeniedRBAC               ReasonCode = "denied_rbac"
-	ReasonDeniedMasterPIIStepUp    ReasonCode = "denied_master_pii_step_up"
-	ReasonDeniedTenantMismatch     ReasonCode = "denied_tenant_mismatch"
-	ReasonDeniedUnknownAction      ReasonCode = "denied_unknown_action"
+	ReasonAllowedRBAC           ReasonCode = "allowed_rbac"
+	ReasonAllowedMaster         ReasonCode = "allowed_master"
+	ReasonDeniedNoPrincipal     ReasonCode = "denied_no_principal"
+	ReasonDeniedRBAC            ReasonCode = "denied_rbac"
+	ReasonDeniedMasterPIIStepUp ReasonCode = "denied_master_pii_step_up"
+	ReasonDeniedTenantMismatch  ReasonCode = "denied_tenant_mismatch"
+	ReasonDeniedUnknownAction   ReasonCode = "denied_unknown_action"
 )
 
 // Resource describes the target of an action. Empty TenantID is allowed
