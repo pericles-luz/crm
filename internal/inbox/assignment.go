@@ -6,28 +6,28 @@ import (
 	"github.com/google/uuid"
 )
 
-// Assignment is an append-only history row: it records that a user was
-// the responsible operator for a conversation during a given interval.
-// AssignedAt is set at construction; UnassignedAt is filled when the
-// next assignment is recorded (or when the conversation closes).
-//
-// The aggregate root for assignment history is the Conversation, but
-// the rows live in their own table because the canonical inbox query
-// is "who is currently assigned" — a derived view over the latest
-// row with UnassignedAt IS NULL.
+// Assignment is an append-only history row in `assignment_history`
+// (migration 0092 / F2-03): it records that a user became the
+// responsible operator for a conversation at AssignedAt for the given
+// Reason. The schema has no `unassigned_at` column — the canonical
+// "current leader" query is `ORDER BY assigned_at DESC LIMIT 1` per
+// (tenant_id, conversation_id).
 type Assignment struct {
 	ID             uuid.UUID
 	TenantID       uuid.UUID
 	ConversationID uuid.UUID
 	UserID         uuid.UUID
 	AssignedAt     time.Time
-	UnassignedAt   *time.Time
+	Reason         LeadReason
 }
 
-// NewAssignment constructs an open-ended assignment row (UnassignedAt
-// nil). Rejects zero tenant / conversation / user ids so the row
-// cannot drift into a NULL-FK state at the database boundary.
-func NewAssignment(tenantID, conversationID, userID uuid.UUID) (*Assignment, error) {
+// NewAssignment constructs a fresh assignment_history row with a typed
+// Reason. Rejects zero UUIDs and invalid reasons so the row cannot
+// drift into a constraint-violation state at the database boundary.
+func NewAssignment(
+	tenantID, conversationID, userID uuid.UUID,
+	reason LeadReason,
+) (*Assignment, error) {
 	if tenantID == uuid.Nil {
 		return nil, ErrInvalidTenant
 	}
@@ -37,41 +37,33 @@ func NewAssignment(tenantID, conversationID, userID uuid.UUID) (*Assignment, err
 	if userID == uuid.Nil {
 		return nil, ErrInvalidAssignee
 	}
+	if !reason.Valid() {
+		return nil, ErrInvalidLeadReason
+	}
 	return &Assignment{
 		ID:             uuid.New(),
 		TenantID:       tenantID,
 		ConversationID: conversationID,
 		UserID:         userID,
 		AssignedAt:     now(),
+		Reason:         reason,
 	}, nil
 }
 
 // HydrateAssignment rebuilds an Assignment from stored fields without
-// running the constructor's invariants. Adapter code uses it to
-// materialise rows.
-func HydrateAssignment(id, tenantID, conversationID, userID uuid.UUID,
-	assignedAt time.Time, unassignedAt *time.Time) *Assignment {
+// running the constructor's invariants. Adapter code uses it after
+// SELECTs on `assignment_history`.
+func HydrateAssignment(
+	id, tenantID, conversationID, userID uuid.UUID,
+	assignedAt time.Time,
+	reason LeadReason,
+) *Assignment {
 	return &Assignment{
 		ID:             id,
 		TenantID:       tenantID,
 		ConversationID: conversationID,
 		UserID:         userID,
 		AssignedAt:     assignedAt,
-		UnassignedAt:   unassignedAt,
+		Reason:         reason,
 	}
-}
-
-// MarkUnassigned closes the assignment interval at t. Idempotent on
-// the value: a second call with a different t is rejected so the
-// history row stays immutable once closed.
-func (a *Assignment) MarkUnassigned(t time.Time) error {
-	if a.UnassignedAt != nil {
-		if a.UnassignedAt.Equal(t) {
-			return nil
-		}
-		return ErrConversationMismatch
-	}
-	tt := t
-	a.UnassignedAt = &tt
-	return nil
 }

@@ -16,6 +16,7 @@ package inbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -183,6 +184,13 @@ func (s *Store) FindOpenConversation(ctx context.Context, tenantID, contactID uu
 // conversation's last_message_at. Both operations run in the same
 // tenant-scoped transaction so a crash between them cannot leave the
 // conversation's pointer behind.
+//
+// When m.Media is non-nil the JSON document is written to
+// `message.media` at insert time (SIN-62848 AC #1: messages with
+// attachments materialise with scan_status="pending" so the inbox
+// view never renders an unscanned blob). Hash/Format are serialised
+// only when populated so the persisted document stays minimal until
+// the MediaScanner worker re-materialises the row.
 func (s *Store) SaveMessage(ctx context.Context, m *domain.Message) error {
 	if m == nil {
 		return fmt.Errorf("inbox/postgres: SaveMessage: nil message")
@@ -197,16 +205,20 @@ func (s *Store) SaveMessage(ctx context.Context, m *domain.Message) error {
 	if created.IsZero() {
 		created = s.nowUTC()
 	}
+	mediaJSON, err := marshalMessageMedia(m.Media)
+	if err != nil {
+		return fmt.Errorf("inbox/postgres: SaveMessage marshal media: %w", err)
+	}
 	return postgres.WithTenant(ctx, s.pool, m.TenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO message
 			  (id, tenant_id, conversation_id, direction, body, status,
-			   channel_external_id, sent_by_user_id, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			   channel_external_id, sent_by_user_id, created_at, media)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		`,
 			m.ID, m.TenantID, m.ConversationID, string(m.Direction), m.Body,
 			string(m.Status), nullString(m.ChannelExternalID),
-			m.SentByUserID, created)
+			m.SentByUserID, created, mediaJSON)
 		if err != nil {
 			return fmt.Errorf("inbox/postgres: SaveMessage insert: %w", err)
 		}
@@ -274,7 +286,8 @@ func (s *Store) FindMessageByChannelExternalID(ctx context.Context, tenantID uui
 	err := postgres.WithTenant(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
 			SELECT m.id, m.tenant_id, m.conversation_id, m.direction, m.body,
-			       m.status, m.channel_external_id, m.sent_by_user_id, m.created_at
+			       m.status, m.channel_external_id, m.sent_by_user_id, m.created_at,
+			       m.media
 			  FROM message m
 			  JOIN conversation c ON c.id = m.conversation_id
 			 WHERE c.channel = $1
@@ -384,7 +397,7 @@ func (s *Store) ListMessages(ctx context.Context, tenantID, conversationID uuid.
 		}
 		rows, err := tx.Query(ctx, `
 			SELECT id, tenant_id, conversation_id, direction, body, status,
-			       channel_external_id, sent_by_user_id, created_at
+			       channel_external_id, sent_by_user_id, created_at, media
 			  FROM message
 			 WHERE conversation_id = $1
 			 ORDER BY created_at ASC, id ASC
@@ -430,7 +443,7 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, conversationID, messag
 	err := postgres.WithTenant(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
 			SELECT id, tenant_id, conversation_id, direction, body, status,
-			       channel_external_id, sent_by_user_id, created_at
+			       channel_external_id, sent_by_user_id, created_at, media
 			  FROM message
 			 WHERE id = $1
 			   AND conversation_id = $2
@@ -546,6 +559,12 @@ func scanConversation(row pgx.Row) (*domain.Conversation, error) {
 // keeps the column order in lock-step with the ORDER BY in ListMessages
 // so a future schema change trips a fast scan failure here rather than
 // surprising the use case downstream.
+//
+// The media column (migration 0092) is projected onto domain.MessageMedia
+// when non-null so the inbox UI can render the hide-flag placeholder for
+// infected attachments ([SIN-62805] F2-05d). Adapters keep the parsing
+// loose: unknown jsonb keys are tolerated; missing scan_status leaves
+// the field empty (template treats it as "no scan yet").
 func scanMessage(row pgx.Row) (*domain.Message, error) {
 	var (
 		id, tenantID, conversationID uuid.UUID
@@ -553,20 +572,33 @@ func scanMessage(row pgx.Row) (*domain.Message, error) {
 		channelExternalID            *string
 		sentByUserID                 *uuid.UUID
 		createdAt                    time.Time
+		mediaJSON                    []byte
 	)
 	if err := row.Scan(&id, &tenantID, &conversationID, &direction, &body, &status,
-		&channelExternalID, &sentByUserID, &createdAt); err != nil {
+		&channelExternalID, &sentByUserID, &createdAt, &mediaJSON); err != nil {
 		return nil, err
 	}
 	cext := ""
 	if channelExternalID != nil {
 		cext = *channelExternalID
 	}
-	return domain.HydrateMessage(
+	msg := domain.HydrateMessage(
 		id, tenantID, conversationID,
 		domain.MessageDirection(direction), body,
 		domain.MessageStatus(status), cext, sentByUserID, createdAt,
-	), nil
+	)
+	if len(mediaJSON) > 0 {
+		var media struct {
+			Hash       string `json:"hash"`
+			Format     string `json:"format"`
+			ScanStatus string `json:"scan_status"`
+		}
+		if err := json.Unmarshal(mediaJSON, &media); err != nil {
+			return nil, fmt.Errorf("inbox/postgres: parse media: %w", err)
+		}
+		msg.AttachMedia(media.Hash, media.Format, media.ScanStatus)
+	}
+	return msg, nil
 }
 
 // isDedupUniqueViolation reports whether err is the
@@ -600,4 +632,29 @@ func nullString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// marshalMessageMedia serialises the domain MessageMedia into the
+// `message.media` jsonb shape (see migration 0094). A nil pointer
+// yields nil (NULL in Postgres) so text-only messages keep an empty
+// media column. Empty fields are omitted so the persisted document
+// stays minimal until the MediaScanner worker patches a verdict in.
+func marshalMessageMedia(m *domain.MessageMedia) (any, error) {
+	if m == nil {
+		return nil, nil
+	}
+	payload := map[string]string{}
+	if m.Hash != "" {
+		payload["hash"] = m.Hash
+	}
+	if m.Format != "" {
+		payload["format"] = m.Format
+	}
+	if m.ScanStatus != "" {
+		payload["scan_status"] = m.ScanStatus
+	}
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(payload)
 }
