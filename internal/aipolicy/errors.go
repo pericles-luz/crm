@@ -1,0 +1,47 @@
+package aipolicy
+
+import "errors"
+
+// ErrInvalidTenant is returned when TenantID is uuid.Nil. Every policy
+// row is tenant-scoped; an anonymous Resolve call is a programming
+// bug that the resolver refuses to translate into a SourceDefault fallback.
+var ErrInvalidTenant = errors.New("aipolicy: invalid tenant id")
+
+// ErrInvalidScopeType is returned when a Policy passed to Upsert
+// carries a ScopeType outside {tenant, team, channel}. The same
+// CHECK constraint exists in Postgres, but the domain rejects the
+// value before the adapter so callers see a typed error instead of
+// a SQL state code.
+var ErrInvalidScopeType = errors.New("aipolicy: invalid scope type")
+
+// ErrInvalidScopeID is returned when ScopeID is blank after trimming.
+// scope_id is NOT NULL in migration 0098; the domain pre-validates so
+// the adapter does not have to translate a generic NOT NULL violation.
+var ErrInvalidScopeID = errors.New("aipolicy: invalid scope id")
+
+// ErrMissingActor is returned by RecordingRepository.Upsert when the
+// call site did not seed the request-scope Actor (UserID == uuid.Nil).
+// Audit non-repudiation requires every mutation to name a human
+// actor; the decorator refuses to write a policy change it cannot
+// attribute.
+var ErrMissingActor = errors.New("aipolicy: missing audit actor")
+
+// ErrInvalidAnonymizerVersion is returned by ConsentService when the
+// supplied anonymizer version is blank after trimming. The consent
+// ledger relies on a non-empty version string for the
+// re-consent-on-version-bump invariant (AC #4 of SIN-62352); rejecting
+// blanks at the boundary keeps a misconfigured caller from writing a
+// row that would silently never roll forward.
+var ErrInvalidAnonymizerVersion = errors.New("aipolicy: invalid anonymizer version")
+
+// ErrInvalidPromptVersion is returned by ConsentService when the
+// supplied prompt version is blank after trimming. Same rationale as
+// ErrInvalidAnonymizerVersion: a blank prompt version on the row would
+// match every future call and defeat the cascade-on-version-bump
+// behaviour the gate depends on.
+var ErrInvalidPromptVersion = errors.New("aipolicy: invalid prompt version")
+
+// ErrNilConsentRepository is returned by NewConsentService when the
+// supplied repository is nil. The service guards construction-time so
+// cmd/server fails to start rather than panicking on the first call.
+var ErrNilConsentRepository = errors.New("aipolicy: ConsentRepository is required")

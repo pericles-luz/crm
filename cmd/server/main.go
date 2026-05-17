@@ -212,12 +212,43 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 	webContactsHandler, webContactsCleanup := buildWebContactsHandler(ctx, getenv)
 	defer webContactsCleanup()
 
+	// SIN-62862 — HTMX funnel board UI (SIN-62797 follow-up). Same
+	// fail-soft pattern as the contacts wire: when DATABASE_URL is
+	// unset the handler is nil and the /funnel* routes stay unmounted.
+	webFunnelHandler, webFunnelCleanup := buildWebFunnelHandler(ctx, getenv)
+	defer webFunnelCleanup()
+
+	// SIN-62354 — HTMX privacy / DPA page (Fase 3, decisão #8 /
+	// SIN-62203). Read-only LGPD disclosure; the wire takes no DB
+	// dependency today (the active-model lookup falls back to the
+	// migration 0098 default until SIN-62351's cascade resolver
+	// lands), so the handler is always non-nil here.
+	webPrivacyHandler, webPrivacyCleanup := buildWebPrivacyHandler(ctx, getenv)
+	defer webPrivacyCleanup()
+
+	// SIN-62906 — HTMX AI policy admin UI (Fase 3 W4A). Same fail-soft
+	// pattern as web/contacts and web/funnel: a nil handler leaves the
+	// /settings/ai-policy routes unmounted when the pgxpool / aipolicy
+	// store cannot be built.
+	webAIPolicyHandler, webAIPolicyCleanup := buildWebAIPolicyHandler(ctx, getenv)
+	defer webAIPolicyCleanup()
+
+	// SIN-62907 — HTMX catalog admin UI (Fase 3 W4C). Same fail-soft
+	// pattern: nil handler leaves /catalog* unmounted when either the
+	// runtime DSN or MASTER_OPS_DATABASE_URL is missing.
+	webCatalogHandler, webCatalogCleanup := buildWebCatalogHandler(ctx, getenv)
+	defer webCatalogCleanup()
+
 	// SIN-62527 / SIN-62217 — IAM chi handler (login, logout, hello-tenant,
 	// /m/*, metrics). Mounted before the custom-domain catch-all so
 	// Go's ServeMux longer-prefix rule keeps IAM routes out of the
 	// catch-all handler.
 	iamHandler, iamCleanup := buildIAMHandler(ctx, getenv, iamHandlerOpts{
 		WebContacts: webContactsHandler,
+		WebFunnel:   webFunnelHandler,
+		WebPrivacy:  webPrivacyHandler,
+		WebAIPolicy: webAIPolicyHandler,
+		WebCatalog:  webCatalogHandler,
 	})
 	defer iamCleanup()
 	if iamHandler != nil {
@@ -280,16 +311,49 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 		workerMu  sync.Mutex
 		workerErr error
 	)
+	recordWorkerErr := func(err error) {
+		workerMu.Lock()
+		defer workerMu.Unlock()
+		if workerErr == nil {
+			workerErr = err
+		}
+	}
 	if wh != nil && wh.RunWorker != nil {
 		workerWG.Add(1)
 		go func() {
 			defer workerWG.Done()
 			if err := wh.RunWorker(ctx); err != nil {
-				workerMu.Lock()
-				if workerErr == nil {
-					workerErr = err
-				}
-				workerMu.Unlock()
+				recordWorkerErr(err)
+			}
+		}()
+	}
+
+	// SIN-62879 billing renewer — same lifecycle as the webhook
+	// reconciler. Cleanup runs after the goroutine exits so the
+	// master_ops pool stays open for in-flight ticks.
+	br := buildBillingRenewerWiring(ctx, getenv)
+	if br != nil {
+		defer br.Cleanup()
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			if err := br.RunWorker(ctx); err != nil {
+				recordWorkerErr(err)
+			}
+		}()
+	}
+
+	// SIN-62881 wallet allocator — consumes subscription.renewed and
+	// credits the tenant wallet idempotently. Same lifecycle pattern;
+	// Cleanup drains the JetStream conn before closing pools.
+	walloc := buildWalletAllocatorWiring(ctx, getenv)
+	if walloc != nil {
+		defer walloc.Cleanup()
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			if err := walloc.RunWorker(ctx); err != nil {
+				recordWorkerErr(err)
 			}
 		}()
 	}

@@ -175,6 +175,112 @@ type Deps struct {
 	// builds this via the SIN-62855 htmx wire and leaves it nil when
 	// DATABASE_URL is unset (consistent with the IAM/internal handlers).
 	WebContacts http.Handler
+
+	// WebFunnel is the HTMX drag-and-drop funnel board handler from
+	// internal/web/funnel (SIN-62797 / Fase 2 F2-12). When non-nil, the
+	// four routes are mounted in the authed group so they inherit
+	// TenantScope + Auth + CSRF + RequireAuth (same security envelope as
+	// WebContacts). cmd/server builds this via the SIN-62862 funnel wire
+	// and leaves it nil when DATABASE_URL is unset.
+	//
+	// Routes mounted:
+	//   GET  /funnel
+	//   POST /funnel/transitions
+	//   GET  /funnel/conversations/{id}/history
+	//   GET  /funnel/modal/close
+	WebFunnel http.Handler
+
+	// WebPrivacy is the HTMX privacy / DPA disclosure handler from
+	// internal/web/privacy (SIN-62354 / Fase 3, decisão #8). When
+	// non-nil, the two GET-only routes are mounted in the authed group
+	// so they inherit TenantScope + Auth + RequireAuth. The page is
+	// read-only (no POST surface), so the CSRF middleware short-circuits
+	// on GET — the page never reaches the CSRF rejection path.
+	//
+	// Routes mounted:
+	//   GET /settings/privacy
+	//   GET /settings/privacy/dpa.md
+	WebPrivacy http.Handler
+
+	// WebAIPolicy is the HTMX admin UI handler for AI policy
+	// configuration from internal/web/aipolicy (SIN-62906 / Fase 3
+	// W4A). Mounted in the authed group with the same envelope as
+	// WebContacts/WebFunnel plus an extra
+	// RequireAction(iam.ActionTenantAIPolicyWrite) gate that applies
+	// to every method (read and write — the admin who can mutate is
+	// the only one who needs to see the page).
+	//
+	// Routes mounted:
+	//   GET    /settings/ai-policy
+	//   GET    /settings/ai-policy/new
+	//   GET    /settings/ai-policy/preview
+	//   GET    /settings/ai-policy/{scope_type}/{scope_id}/edit
+	//   POST   /settings/ai-policy
+	//   PATCH  /settings/ai-policy/{scope_type}/{scope_id}
+	//   DELETE /settings/ai-policy/{scope_type}/{scope_id}
+	WebAIPolicy http.Handler
+
+	// WebCatalog is the HTMX admin UI handler for the per-tenant
+	// product catalog from internal/web/catalog (SIN-62907 / Fase 3
+	// W4C). Mounted in the authed group with the same envelope as
+	// WebAIPolicy: RequireAuth → RequireAction(iam.
+	// ActionTenantCatalogManage). One action gates every method
+	// because the gerente who manages the catalog is the only role
+	// that needs to see it.
+	//
+	// Routes mounted:
+	//   GET    /catalog
+	//   GET    /catalog/new
+	//   POST   /catalog
+	//   GET    /catalog/{id}
+	//   GET    /catalog/{id}/edit
+	//   PATCH  /catalog/{id}
+	//   DELETE /catalog/{id}
+	//   GET    /catalog/{id}/preview
+	//   GET    /catalog/{id}/arguments/new
+	//   POST   /catalog/{id}/arguments
+	//   GET    /catalog/{id}/arguments/{arg_id}/edit
+	//   PATCH  /catalog/{id}/arguments/{arg_id}
+	//   DELETE /catalog/{id}/arguments/{arg_id}
+	WebCatalog http.Handler
+
+	// MasterTenants bundles the three master-console tenant routes
+	// from internal/web/master (SIN-62882 / Fase 2.5 C9). Each slot
+	// is the inner http.Handler the wire layer hands the router;
+	// NewRouter wraps each with the canonical RequireAuth →
+	// RequireAction gate using the per-route Action constant from
+	// SIN-62880. Any nil slot (or a nil Authorizer at the router
+	// level) causes that specific route to be skipped — router tests
+	// that don't exercise the master surface keep their pre-PR
+	// behaviour.
+	//
+	// Routes mounted (all in the tenanted+authed group so they
+	// inherit TenantScope + Auth + CSRF):
+	//   GET   /master/tenants            — ActionMasterTenantRead
+	//   POST  /master/tenants            — ActionMasterTenantCreate
+	//   PATCH /master/tenants/{id}/plan  — ActionMasterSubscriptionAssignPlan
+	MasterTenants MasterTenantsRoutes
+}
+
+// MasterTenantsRoutes bundles the three inner handlers for the master
+// /master/tenants surface so NewRouter can wrap each one with its
+// per-action RequireAction gate. cmd/server constructs the inner
+// handlers from internal/web/master.Handler and passes them through
+// via Deps.MasterTenants; tests can pass simple http.Handler stubs.
+type MasterTenantsRoutes struct {
+	List       http.Handler
+	Create     http.Handler
+	AssignPlan http.Handler
+	// SIN-62884 C10 — grants surface. Each handler is conditionally
+	// mounted; nil slots are skipped so deploys that haven't wired
+	// the wallet adapter behave the same as the pre-C10 router. The
+	// two write slots (GrantsCreate / GrantsRevoke) are additionally
+	// expected to be wrapped with mastermfa.RequireRecentMFA by the
+	// caller before being assigned here — see the wire layer in
+	// cmd/server for the canonical composition.
+	GrantsNew    http.Handler
+	GrantsCreate http.Handler
+	GrantsRevoke http.Handler
 }
 
 // NewRouter wires the chi router with the canonical middleware chain and
@@ -297,6 +403,156 @@ func NewRouter(deps Deps) http.Handler {
 				webContacts := middleware.RequireAuth(middleware.RequireAuthDeps{})(deps.WebContacts)
 				authed.Method(http.MethodGet, "/contacts/{contactID}", webContacts)
 				authed.Method(http.MethodPost, "/contacts/identity/split", webContacts)
+			}
+
+			// SIN-62862 — HTMX funnel board UI (SIN-62797 follow-up).
+			// Same envelope as WebContacts: the chi authed group already
+			// stitches TenantScope + Auth + CSRF; RequireAuth installs
+			// iam.Principal in context before the inner handler runs. The
+			// inner http.Handler is a stdlib *http.ServeMux produced by
+			// web/funnel.Handler.Routes — Go 1.22 method+pattern syntax
+			// re-matches each route inside the mux so r.PathValue("id")
+			// resolves for the history modal.
+			if deps.WebFunnel != nil {
+				webFunnel := middleware.RequireAuth(middleware.RequireAuthDeps{})(deps.WebFunnel)
+				authed.Method(http.MethodGet, "/funnel", webFunnel)
+				authed.Method(http.MethodPost, "/funnel/transitions", webFunnel)
+				authed.Method(http.MethodGet, "/funnel/conversations/{id}/history", webFunnel)
+				authed.Method(http.MethodGet, "/funnel/modal/close", webFunnel)
+			}
+
+			// SIN-62354 — HTMX privacy / DPA disclosure (Fase 3, decisão #8).
+			// Same envelope as WebContacts / WebFunnel. The two routes are
+			// GET-only so the CSRF middleware short-circuits naturally.
+			// AC #1: any authenticated tenant user reaches the page — no
+			// extra RequireAction check beyond the inherited RequireAuth.
+			if deps.WebPrivacy != nil {
+				webPrivacy := middleware.RequireAuth(middleware.RequireAuthDeps{})(deps.WebPrivacy)
+				authed.Method(http.MethodGet, "/settings/privacy", webPrivacy)
+				authed.Method(http.MethodGet, "/settings/privacy/dpa.md", webPrivacy)
+			}
+
+			// SIN-62906 — HTMX AI policy admin UI (Fase 3 W4A). Same
+			// envelope as the other web/* handlers plus an explicit
+			// RequireAction gate on every method (the admin who can
+			// mutate the configuration is the only one who needs to
+			// see it). The gate is mounted only when Authorizer is
+			// wired; router tests that don't exercise authz keep their
+			// pre-PR behaviour.
+			if deps.WebAIPolicy != nil {
+				// RequireAuth runs OUTSIDE RequireAction so the
+				// principal is in context when the authz gate
+				// consults it. Mirrors the /hello-tenant wireup
+				// above. When Authorizer is nil (router tests),
+				// the route mounts with RequireAuth only — the
+				// gate skips and the handler still sees a
+				// Principal.
+				webAIPolicy := http.Handler(deps.WebAIPolicy)
+				if deps.Authorizer != nil {
+					webAIPolicy = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantAIPolicyWrite, nil)(webAIPolicy),
+					)
+				} else {
+					webAIPolicy = middleware.RequireAuth(middleware.RequireAuthDeps{})(webAIPolicy)
+				}
+				authed.Method(http.MethodGet, "/settings/ai-policy", webAIPolicy)
+				authed.Method(http.MethodGet, "/settings/ai-policy/new", webAIPolicy)
+				authed.Method(http.MethodGet, "/settings/ai-policy/preview", webAIPolicy)
+				authed.Method(http.MethodGet, "/settings/ai-policy/{scope_type}/{scope_id}/edit", webAIPolicy)
+				authed.Method(http.MethodPost, "/settings/ai-policy", webAIPolicy)
+				authed.Method(http.MethodPatch, "/settings/ai-policy/{scope_type}/{scope_id}", webAIPolicy)
+				authed.Method(http.MethodDelete, "/settings/ai-policy/{scope_type}/{scope_id}", webAIPolicy)
+			}
+
+			// SIN-62907 — HTMX catalog admin UI (Fase 3 W4C). Same
+			// envelope as WebAIPolicy: RequireAuth installs the
+			// principal, RequireAction(ActionTenantCatalogManage) gates
+			// every method. When Authorizer is nil (router tests that
+			// don't exercise the authz seam) the gate skips and the
+			// inner mux still runs with a Principal.
+			if deps.WebCatalog != nil {
+				webCatalog := http.Handler(deps.WebCatalog)
+				if deps.Authorizer != nil {
+					webCatalog = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantCatalogManage, nil)(webCatalog),
+					)
+				} else {
+					webCatalog = middleware.RequireAuth(middleware.RequireAuthDeps{})(webCatalog)
+				}
+				authed.Method(http.MethodGet, "/catalog", webCatalog)
+				authed.Method(http.MethodGet, "/catalog/new", webCatalog)
+				authed.Method(http.MethodPost, "/catalog", webCatalog)
+				authed.Method(http.MethodGet, "/catalog/{id}", webCatalog)
+				authed.Method(http.MethodGet, "/catalog/{id}/edit", webCatalog)
+				authed.Method(http.MethodPatch, "/catalog/{id}", webCatalog)
+				authed.Method(http.MethodDelete, "/catalog/{id}", webCatalog)
+				authed.Method(http.MethodGet, "/catalog/{id}/preview", webCatalog)
+				authed.Method(http.MethodGet, "/catalog/{id}/arguments/new", webCatalog)
+				authed.Method(http.MethodPost, "/catalog/{id}/arguments", webCatalog)
+				authed.Method(http.MethodGet, "/catalog/{id}/arguments/{arg_id}/edit", webCatalog)
+				authed.Method(http.MethodPatch, "/catalog/{id}/arguments/{arg_id}", webCatalog)
+				authed.Method(http.MethodDelete, "/catalog/{id}/arguments/{arg_id}", webCatalog)
+			}
+
+			// SIN-62882 — HTMX master/tenants UI (Fase 2.5 C9). Each
+			// of the three routes goes through RequireAuth (lifts
+			// session → Principal) and a per-route RequireAction gate
+			// using the master-* action constants added in SIN-62880.
+			// The Authorizer is the SIN-62765 AuditingAuthorizer, so a
+			// tenant-role user hitting /master/* receives a 403 and an
+			// audit_log_security row in one motion (CA #2). Per-route
+			// gating (rather than a single group middleware) is what
+			// gives master.tenant.create / master.subscription.
+			// assign_plan distinct audit rows.
+			if deps.Authorizer != nil {
+				if deps.MasterTenants.List != nil {
+					listH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterTenantRead, nil)(deps.MasterTenants.List),
+					)
+					authed.Method(http.MethodGet, "/master/tenants", listH)
+				}
+				if deps.MasterTenants.Create != nil {
+					createH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterTenantCreate, nil)(deps.MasterTenants.Create),
+					)
+					authed.Method(http.MethodPost, "/master/tenants", createH)
+				}
+				if deps.MasterTenants.AssignPlan != nil {
+					assignH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterSubscriptionAssignPlan, nil)(deps.MasterTenants.AssignPlan),
+					)
+					authed.Method(http.MethodPatch, "/master/tenants/{id}/plan", assignH)
+				}
+				// SIN-62884 — HTMX master/grants UI (Fase 2.5 C10).
+				// Same gating envelope as the tenants surface. The
+				// GET form gates on the free-period action (master-
+				// only, same RBAC band as the POST). The two POST
+				// routes are pre-wrapped with
+				// mastermfa.RequireRecentMFA at the wire layer so the
+				// router only needs to add RequireAction here. The
+				// audit row is written twice on a successful POST:
+				// once by RequireAction (the authorization event) and
+				// once by the C8 AuditedMasterGrantRepository
+				// decorator (the master.grant.issued business event)
+				// — see ADR-0098 §D3.
+				if deps.MasterTenants.GrantsNew != nil {
+					gNew := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantCourtesyFreeSubscriptionPeriod, nil)(deps.MasterTenants.GrantsNew),
+					)
+					authed.Method(http.MethodGet, "/master/tenants/{id}/grants/new", gNew)
+				}
+				if deps.MasterTenants.GrantsCreate != nil {
+					gCreate := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantCourtesyFreeSubscriptionPeriod, nil)(deps.MasterTenants.GrantsCreate),
+					)
+					authed.Method(http.MethodPost, "/master/tenants/{id}/grants", gCreate)
+				}
+				if deps.MasterTenants.GrantsRevoke != nil {
+					gRevoke := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantCourtesyRevoke, nil)(deps.MasterTenants.GrantsRevoke),
+					)
+					authed.Method(http.MethodPost, "/master/grants/{id}/revoke", gRevoke)
+				}
 			}
 		})
 	})

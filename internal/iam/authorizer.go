@@ -34,6 +34,46 @@ const (
 	ActionMasterTenantUpdate      Action = "master.tenant.update"
 	ActionMasterTenantDelete      Action = "master.tenant.delete"
 	ActionMasterTenantImpersonate Action = "master.tenant.impersonate"
+
+	// Fase 2.5 — billing / wallet additions (SIN-62880). Master ops on
+	// subscription plan + courtesy grant lifecycle; the wallet/billing
+	// domain types live in internal/billing and internal/wallet, but
+	// these action identifiers are pure strings — handlers in C9–C11
+	// consume billing/wallet ports and resolve the resource separately.
+	ActionMasterSubscriptionAssignPlan              Action = "master.subscription.assign_plan"
+	ActionMasterSubscriptionCancel                  Action = "master.subscription.cancel"
+	ActionMasterGrantCourtesyFreeSubscriptionPeriod Action = "master.grant_courtesy.free_subscription_period"
+	ActionMasterGrantCourtesyExtraTokens            Action = "master.grant_courtesy.extra_tokens"
+	ActionMasterGrantCourtesyRevoke                 Action = "master.grant_courtesy.revoke"
+
+	// Tenant-scope billing/wallet reads. Restricted to gerente — atendente
+	// and common do not see the wallet ledger or invoke history. RLS in
+	// internal/db/postgres scopes the underlying tables by company_id;
+	// this gate is the application-layer second link of defense-in-depth.
+	ActionTenantBillingView      Action = "tenant.billing.view"
+	ActionTenantWalletViewLedger Action = "tenant.wallet.view_ledger"
+
+	// Fase 3 H1 — ai-policy config + audit (SIN-62353, decisão #8).
+	// Write is restricted to gerente because flipping ai_enabled is a
+	// privacy-sensitive control (LGPD opt-in, ADR-0041). Audit read
+	// shares the role per spec ("default = mesmo papel que
+	// ai-policy.write"); master operators see the cross-tenant slice
+	// via the master.audit.read action below.
+	ActionTenantAIPolicyWrite     Action = "tenant.ai_policy.write"
+	ActionTenantAIPolicyAuditRead Action = "tenant.ai_policy.audit.read"
+
+	// Master-scope audit read: cross-tenant slice of ai_policy_audit
+	// served at /admin/audit?tenant=...&module=ai-policy. Master only;
+	// the gate runs alongside the standard master.* surface.
+	ActionMasterAuditRead Action = "master.audit.read"
+
+	// Fase 3 W4C — product catalog admin (SIN-62907). One action gates
+	// every catalog mutation surface (create / update / delete on
+	// Product and ProductArgument) plus the read views: the gerente who
+	// manages the catalog is the only role that needs to see it, mirroring
+	// the W4A ai-policy pattern. Atendente / common are denied at the
+	// router gate.
+	ActionTenantCatalogManage Action = "tenant.catalog.manage"
 )
 
 // ReasonCode is a stable, low-cardinality classifier for the Decision.
@@ -142,6 +182,27 @@ func defaultRolesByAction() map[Action][]Role {
 		ActionMasterTenantUpdate:      {RoleMaster},
 		ActionMasterTenantDelete:      {RoleMaster},
 		ActionMasterTenantImpersonate: {RoleMaster},
+
+		// Fase 2.5 — master billing/courtesy ops (SIN-62880).
+		ActionMasterSubscriptionAssignPlan:              {RoleMaster},
+		ActionMasterSubscriptionCancel:                  {RoleMaster},
+		ActionMasterGrantCourtesyFreeSubscriptionPeriod: {RoleMaster},
+		ActionMasterGrantCourtesyExtraTokens:            {RoleMaster},
+		ActionMasterGrantCourtesyRevoke:                 {RoleMaster},
+
+		// Fase 2.5 — tenant billing/wallet reads (SIN-62880). Gerente
+		// only: atendente and common do not see the wallet ledger or
+		// invoice history.
+		ActionTenantBillingView:      {RoleTenantGerente},
+		ActionTenantWalletViewLedger: {RoleTenantGerente},
+
+		// Fase 3 H1 — ai-policy + audit (SIN-62353, decisão #8).
+		ActionTenantAIPolicyWrite:     {RoleTenantGerente},
+		ActionTenantAIPolicyAuditRead: {RoleTenantGerente},
+		ActionMasterAuditRead:         {RoleMaster},
+
+		// Fase 3 W4C — catalog admin (SIN-62907). Gerente only.
+		ActionTenantCatalogManage: {RoleTenantGerente},
 	}
 }
 
@@ -155,6 +216,19 @@ func defaultMasterActions() map[Action]struct{} {
 		ActionMasterTenantUpdate:      {},
 		ActionMasterTenantDelete:      {},
 		ActionMasterTenantImpersonate: {},
+
+		// Fase 2.5 — master billing/courtesy ops (SIN-62880). These are
+		// master-scope: a master can invoke them without impersonating a
+		// tenant. tenant.billing.view / tenant.wallet.view_ledger are
+		// tenant-scope and do NOT belong here.
+		ActionMasterSubscriptionAssignPlan:              {},
+		ActionMasterSubscriptionCancel:                  {},
+		ActionMasterGrantCourtesyFreeSubscriptionPeriod: {},
+		ActionMasterGrantCourtesyExtraTokens:            {},
+		ActionMasterGrantCourtesyRevoke:                 {},
+
+		// Fase 3 H1 — master cross-tenant audit reader (SIN-62353).
+		ActionMasterAuditRead: {},
 	}
 }
 

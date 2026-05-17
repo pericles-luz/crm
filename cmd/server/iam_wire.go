@@ -47,11 +47,29 @@ const envSlackWebhook = "SLACK_WEBHOOK_URL"
 // handles it inside the authed group when Deps.WebContacts is wired.
 // The trailing slash makes it a stdlib subtree pattern that catches
 // /contacts/{id} and /contacts/identity/split.
+//
+// SIN-62862 adds the funnel HTMX UI:
+//   - "/funnel" matches the exact board path GET /funnel.
+//   - "/funnel/" matches the three sub-routes (transitions, conversations/{id}/history,
+//     modal/close); Go's mux prefers the longer pattern, so the exact
+//     "/funnel" still wins for GET /funnel.
+//
+// SIN-62354 adds the privacy / DPA disclosure UI (Fase 3, decisão #8):
+//   - "/settings/privacy" matches the page itself.
+//   - "/settings/privacy/dpa.md" matches the DPA download. The longer
+//     pattern wins by Go 1.22 mux specificity, so the exact page route
+//     still hits the page handler.
 var iamRoutes = []string{
 	"/login",
 	"/logout",
 	"/hello-tenant",
 	"/contacts/",
+	"/funnel",
+	"/funnel/",
+	"/settings/privacy",
+	"/settings/privacy/dpa.md",
+	"/catalog",
+	"/catalog/",
 	"/m/",
 	"/metrics",
 }
@@ -66,6 +84,29 @@ type iamHandlerOpts struct {
 	// the /contacts/{contactID} + /contacts/identity/split routes
 	// unmounted; the chi router emits 404 for those paths.
 	WebContacts http.Handler
+
+	// WebFunnel is the SIN-62862 HTMX funnel board mux. Nil keeps the
+	// four /funnel* routes unmounted (chi emits 404) so cmd/server boots
+	// cleanly when DATABASE_URL is unset.
+	WebFunnel http.Handler
+
+	// WebPrivacy is the SIN-62354 HTMX privacy / DPA disclosure mux.
+	// Nil keeps the two /settings/privacy* routes unmounted; the wire
+	// in privacy_wire.go takes no DB dependency so this is non-nil
+	// whenever the privacy_wire factory succeeded.
+	WebPrivacy http.Handler
+
+	// WebAIPolicy is the SIN-62906 HTMX AI policy admin UI mux. Nil
+	// keeps the /settings/ai-policy* routes unmounted; the wire in
+	// ai_policy_wire.go owns its own pgxpool and returns nil when the
+	// DB / aipolicy store cannot be built.
+	WebAIPolicy http.Handler
+
+	// WebCatalog is the SIN-62907 HTMX catalog admin UI mux. Nil keeps
+	// the /catalog* routes unmounted; the wire in catalog_wire.go
+	// owns its runtime + master_ops pgxpools and returns nil when
+	// either DSN is missing or the connection fails.
+	WebCatalog http.Handler
 }
 
 // buildIAMHandler assembles the IAM deps and returns the chi handler plus a
@@ -152,6 +193,10 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		// that lands the session role/last_activity DB columns (0077).
 		// Master MFA deps deferred to batch 17 (SIN-62526).
 		WebContacts: opts.WebContacts,
+		WebFunnel:   opts.WebFunnel,
+		WebPrivacy:  opts.WebPrivacy,
+		WebAIPolicy: opts.WebAIPolicy,
+		WebCatalog:  opts.WebCatalog,
 	})
 
 	fullCleanup := func() {
