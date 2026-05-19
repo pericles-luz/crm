@@ -60,7 +60,7 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/server                ./cmd/serv
 # CA certs and the binary. The worker only needs outbound TCP to NATS,
 # Postgres, clamd, MinIO and Slack — distroless covers all of that via the
 # CA bundle baked into the base. See gcr.io/distroless/static for the contract.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1 AS crm-mediascan-worker
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-mediascan-worker
 
 COPY --from=builder /out/mediascan-worker /app/mediascan-worker
 
@@ -70,7 +70,7 @@ ENTRYPOINT ["/app/mediascan-worker"]
 
 # --- wallet-alerter-worker runtime ----------------------------------------
 # Same distroless contract as mediascan-worker. Outbound to NATS + Slack only.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1 AS crm-wallet-alerter-worker
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-wallet-alerter-worker
 
 COPY --from=builder /out/wallet-alerter-worker /app/wallet-alerter-worker
 
@@ -81,7 +81,7 @@ ENTRYPOINT ["/app/wallet-alerter-worker"]
 # --- server runtime (DEFAULT) ---------------------------------------------
 # Kept as the LAST stage so an unqualified `docker build .` still produces
 # the server image that cd-stg.yml has been pushing since SIN-62215.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1 AS crm-server
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-server
 
 COPY --from=builder /out/server /app/crm
 
