@@ -26,8 +26,8 @@ type Handler struct {
 	now           func() time.Time
 	primaryDomain string
 	logger        *slog.Logger
-	rateLimiter   VerifyRateLimiter       // nil → no rate-limiting (tests that don't exercise it)
-	audit         management.AuditLogger  // nil → rate-limit denials not audited
+	rateLimiter   VerifyRateLimiter      // nil → no rate-limiting (tests that don't exercise it)
+	audit         management.AuditLogger // nil → rate-limit denials not audited
 }
 
 // UseCase is the narrow management surface the handler relies on.
