@@ -30,10 +30,12 @@ import (
 
 	postgresadapter "github.com/pericles-luz/crm/internal/adapter/db/postgres"
 	"github.com/pericles-luz/crm/internal/adapter/httpapi"
+	"github.com/pericles-luz/crm/internal/adapter/httpapi/middleware"
 	slackadapter "github.com/pericles-luz/crm/internal/adapter/notify/slack"
 	rlredis "github.com/pericles-luz/crm/internal/adapter/ratelimit/redis"
 	"github.com/pericles-luz/crm/internal/iam"
 	"github.com/pericles-luz/crm/internal/iam/ratelimit"
+	"github.com/pericles-luz/crm/internal/obs"
 	"github.com/pericles-luz/crm/internal/tenancy"
 	"github.com/pericles-luz/crm/internal/version"
 )
@@ -79,6 +81,24 @@ var iamRoutes = []string{
 	// inside the tenanted group. The custom-domain catch-all at "/"
 	// still loses to the more-specific "/c/" prefix on every request.
 	"/c/",
+	// SIN-63186 — LGPD admin surface (Fase 6 PR3). The stdlib mux
+	// dispatches "/admin/lgpd/" (subtree) to the chi router, which then
+	// re-matches "GET /admin/lgpd/export" and "POST /admin/lgpd/delete"
+	// inside the authed tenanted group. Without this prefix the
+	// custom-domain catch-all at "/" would shadow both routes and the
+	// SIN-63186 RequireAction gate would never run.
+	"/admin/lgpd/",
+	// SIN-63191 — Fase 6 PR4. /admin/contacts/{id}/lgpd is shadowed by
+	// the existing /contacts/ prefix only when the chi router is wired,
+	// so we register a dedicated subtree under /admin/contacts/ for the
+	// LGPD page.
+	"/admin/contacts/",
+	// SIN-63191 — public LGPD pages. /privacy is the disclosure page
+	// (unauthenticated by design); /consent/ carries the cookie banner
+	// + decision POST. Both subtrees must hit the chi router so the
+	// custom-domain catch-all at "/" does not shadow them.
+	"/privacy",
+	"/consent/",
 	"/m/",
 	"/metrics",
 }
@@ -136,6 +156,53 @@ type iamHandlerOpts struct {
 	// tenanted group but outside the authed sub-group — the redirect
 	// is unauthenticated by design (AC #1).
 	WebCampaignPublic http.Handler
+
+	// WebBranding is the SIN-63084 HTMX branding admin mux. Nil keeps
+	// the /branding* routes unmounted; the wire in branding_ui_wire.go
+	// has no DB dependency and only returns nil on a programmer error
+	// in webbranding.New.
+	WebBranding http.Handler
+
+	// WebLGPD carries the SIN-63186 admin handlers + lgpd_admin rate
+	// limit produced by buildLGPDStack. Built inside buildIAMHandler
+	// (like WebCampaignPublic) so it reuses the IAM pool + Redis; the
+	// caller-supplied opts value, when its Export / Delete slots are
+	// already set, wins so tests can inject stubs without standing up
+	// the postgres + redis stack.
+	WebLGPD httpapi.LGPDRoutes
+
+	// WebPublicPrivacy is the SIN-63191 public LGPD disclosure page
+	// handler. Nil keeps GET /privacy unmounted. Built by the wire
+	// layer in privacy_public_wire.go on top of the postgres tenant
+	// resolver; the slot here lets cmd/server unit tests inject a
+	// stub without standing up the DB.
+	WebPublicPrivacy http.Handler
+
+	// WebConsent is the SIN-63191 cookie consent banner handler. Nil
+	// keeps GET /consent/cookies-banner and POST /consent/cookies
+	// unmounted. Built by the wire layer in consent_wire.go.
+	WebConsent http.Handler
+
+	// Theme is the SIN-63085 per-tenant theme middleware, built by
+	// branding_ui_wire.go on top of the same PaletteStore that backs
+	// the WebBranding handler. Mounted by httpapi.NewRouter inside
+	// the tenanted group so every authenticated render sees the
+	// resolved palette via branding.ThemeStyleFromContext. Nil keeps
+	// the chain unchanged — pages fall back to DefaultThemeStyle and
+	// the AC #4 cache-invalidation seam is a no-op.
+	Theme *middleware.ThemeMiddleware
+
+	// Metrics is the process-wide obs.Metrics constructed at boot.
+	// SIN-63105 threads it through httpapi.Deps.Metrics so the
+	// /metrics scrape endpoint is mounted and the per-route
+	// HTTPMetrics middleware records http_requests_total /
+	// http_request_duration_seconds. The same pointer also backs
+	// the SIN-63085 theme middleware's ObserveThemeCacheLookup hook
+	// (wired via buildBrandingStack), so tenant_theme_cache_hits_total
+	// is observable on the same scrape. Nil keeps the router behaving
+	// as it did pre-SIN-63105 — /metrics returns 404 and the counters
+	// stay silent.
+	Metrics *obs.Metrics
 }
 
 // buildIAMHandler assembles the IAM deps and returns the chi handler plus a
@@ -203,6 +270,22 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		return nil, noop
 	}
 
+	// SIN-63214 — split audit logger for router-mounted handlers that
+	// need to emit a SecurityEvent* row (currently the tenant POST
+	// /logout, added in PR #234 / SIN-63188). Same pool + same writer
+	// shape the audited authorizer already uses; instantiated separately
+	// because the audited wrap keeps its own splitLogger encapsulated.
+	// A constructor failure is fatal at boot for the same reason the
+	// authz audit wrap is — silently running without the logout audit
+	// row would degrade the security ledger.
+	logoutAudit, err := postgresadapter.NewSplitAuditLogger(pool)
+	if err != nil {
+		pool.Close()
+		cleanup()
+		log.Printf("crm: IAM handler disabled — logout audit logger: %v", err)
+		return nil, noop
+	}
+
 	// SIN-62959 — public campaign redirect endpoint. Built here so it
 	// reuses the IAM pool + Redis (no second pgxpool / goredis client
 	// opened). A failure to build the handler is non-fatal — the
@@ -216,6 +299,22 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		} else {
 			webCampaignPublic = h
 		}
+	}
+
+	// SIN-63186 — LGPD admin handlers + lgpd_admin rate limit. Built
+	// here so it reuses the IAM pool + Redis; opens a second pgxpool
+	// against MASTER_OPS_DATABASE_URL for the store constructor (the
+	// web handlers themselves only hit the runtime pool, but the store
+	// constructor takes both pools so the same store can back the
+	// retention worker without a second adapter). opts.WebLGPD, when
+	// the caller has wired Export / Delete, wins over the wire-built
+	// stack so tests can inject stubs.
+	lgpdRoutes := opts.WebLGPD
+	lgpdCleanup := func() {}
+	if lgpdRoutes.Export == nil || lgpdRoutes.Delete == nil {
+		stack := buildLGPDStack(ctx, pool, rdb, getenv)
+		lgpdRoutes = stack.Routes
+		lgpdCleanup = stack.Cleanup
 	}
 
 	h := httpapi.NewRouter(httpapi.Deps{
@@ -239,6 +338,7 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		Policies:    policies,
 		RateLimiter: limiter,
 		Authorizer:  audited,
+		AuditLogger: logoutAudit,
 		// SessionToucher is nil — Activity middleware deferred to batch
 		// that lands the session role/last_activity DB columns (0077).
 		// Master MFA deps deferred to batch 17 (SIN-62526).
@@ -250,9 +350,16 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		WebCampaigns:      opts.WebCampaigns,
 		WebFunnelRules:    opts.WebFunnelRules,
 		WebCampaignPublic: webCampaignPublic,
+		WebBranding:       opts.WebBranding,
+		WebLGPD:           lgpdRoutes,
+		WebPublicPrivacy:  opts.WebPublicPrivacy,
+		WebConsent:        opts.WebConsent,
+		Theme:             opts.Theme,
+		Metrics:           opts.Metrics,
 	})
 
 	fullCleanup := func() {
+		lgpdCleanup()
 		pool.Close()
 		cleanup()
 	}

@@ -51,6 +51,31 @@ const (
 	SecurityEventMasterGrantIssued        SecurityEvent = "master.grant.issued"
 	SecurityEventSubscriptionCreated      SecurityEvent = "subscription.created"
 	SecurityEventInvoiceCancelledByMaster SecurityEvent = "invoice.cancelled_by_master"
+
+	// SIN-63184 / Fase 6 PR1: tenant 2FA TOTP events. The CHECK clause
+	// in migration 0107 mirrors these literals.
+	//
+	//   * 2fa_required           — a bypass attempt: an authenticated
+	//                              admin (or member with totp_required_at
+	//                              set) reached a guarded endpoint without
+	//                              a TOTP-verified session. AC #2.
+	//   * 2fa_recovery_used      — a single-use recovery code was
+	//                              consumed; the user's enrolment is
+	//                              flagged reenroll_required.
+	//   * 2fa_recovery_regenerated — the user regenerated their recovery
+	//                              codes; the prior active set was
+	//                              invalidated.
+	SecurityEvent2FARequired            SecurityEvent = "2fa_required"
+	SecurityEvent2FARecoveryUsed        SecurityEvent = "2fa_recovery_used"
+	SecurityEvent2FARecoveryRegenerated SecurityEvent = "2fa_recovery_regenerated"
+
+	// SIN-63188 / Fase 6 PR6: explicit logout audit. Emitted by both
+	// the tenant /logout handler and the master /m/logout handler
+	// after the server-side session row is deleted. Target jsonb
+	// carries {session_id, audience, reason}. The CHECK clause in
+	// migration 0110 mirrors this literal — extending the constant
+	// requires extending that migration first.
+	SecurityEventLogout SecurityEvent = "logout"
 )
 
 // DataEvent is the controlled vocabulary of audit_log_data rows.
@@ -63,6 +88,14 @@ const (
 	DataEventExportCSV    DataEvent = "export_csv"
 	DataEventLGPDExport   DataEvent = "lgpd_export"
 	DataEventLGPDForget   DataEvent = "lgpd_forget"
+
+	// SIN-63185 / Fase 6 PR2: generic LGPD consent ledger
+	// (consent_record, migration 0107). One audit_log_data row per
+	// Record/Revoke, target carries IP + user-agent. The CHECK clause
+	// on audit_log_data.event_type was extended in 0107 to accept
+	// these literals.
+	DataEventConsentGrant  DataEvent = "consent_grant"
+	DataEventConsentRevoke DataEvent = "consent_revoke"
 )
 
 var allSecurityEvents = map[SecurityEvent]struct{}{
@@ -81,14 +114,20 @@ var allSecurityEvents = map[SecurityEvent]struct{}{
 	SecurityEventMasterGrantIssued:        {},
 	SecurityEventSubscriptionCreated:      {},
 	SecurityEventInvoiceCancelledByMaster: {},
+	SecurityEvent2FARequired:              {},
+	SecurityEvent2FARecoveryUsed:          {},
+	SecurityEvent2FARecoveryRegenerated:   {},
+	SecurityEventLogout:                   {},
 }
 
 var allDataEvents = map[DataEvent]struct{}{
-	DataEventReadPII:      {},
-	DataEventWriteContact: {},
-	DataEventExportCSV:    {},
-	DataEventLGPDExport:   {},
-	DataEventLGPDForget:   {},
+	DataEventReadPII:       {},
+	DataEventWriteContact:  {},
+	DataEventExportCSV:     {},
+	DataEventLGPDExport:    {},
+	DataEventLGPDForget:    {},
+	DataEventConsentGrant:  {},
+	DataEventConsentRevoke: {},
 }
 
 // IsKnown reports whether e is in the controlled vocabulary.

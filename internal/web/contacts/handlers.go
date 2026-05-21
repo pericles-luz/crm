@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/csrf"
+	"github.com/pericles-luz/crm/internal/branding"
 	"github.com/pericles-luz/crm/internal/contacts"
 	contactsusecase "github.com/pericles-luz/crm/internal/contacts/usecase"
 	"github.com/pericles-luz/crm/internal/tenancy"
@@ -100,6 +101,13 @@ func (h *Handler) view(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid contact id", http.StatusBadRequest)
 		return
 	}
+	// uuid.Nil is syntactically valid but never identifies a real contact.
+	// Map it to 404 so it joins the regular "not found" path instead of
+	// tripping the use-case nil-guard and leaking a 500 — see SIN-63219.
+	if contactID == uuid.Nil {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
 	res, err := h.deps.LoadIdentity.Execute(r.Context(), contactsusecase.LoadIdentityInput{
 		TenantID: tenant.ID, ContactID: contactID,
 	})
@@ -118,8 +126,9 @@ func (h *Handler) view(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := contactLayoutTmpl.Execute(w, layoutData{
-		CSRFMeta:  csrf.MetaTag(token),
-		HXHeaders: csrf.HXHeadersAttr(token),
+		CSRFMeta:         csrf.MetaTag(token),
+		HXHeaders:        csrf.HXHeadersAttr(token),
+		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
 		Panel: panelData{
 			ContactID: contactID,
 			Identity:  res.Identity,
@@ -195,7 +204,8 @@ type panelData struct {
 
 // layoutData drives the full-page contact view.
 type layoutData struct {
-	CSRFMeta  template.HTML
-	HXHeaders template.HTMLAttr
-	Panel     panelData
+	CSRFMeta         template.HTML
+	HXHeaders        template.HTMLAttr
+	Panel            panelData
+	TenantThemeStyle template.CSS
 }
