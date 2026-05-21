@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/pericles-luz/crm/internal/branding"
 	"github.com/pericles-luz/crm/internal/customdomain/management"
 	"github.com/pericles-luz/crm/internal/http/middleware/csp"
 )
@@ -24,6 +26,8 @@ type Handler struct {
 	now           func() time.Time
 	primaryDomain string
 	logger        *slog.Logger
+	rateLimiter   VerifyRateLimiter      // nil → no rate-limiting (tests that don't exercise it)
+	audit         management.AuditLogger // nil → rate-limit denials not audited
 }
 
 // UseCase is the narrow management surface the handler relies on.
@@ -33,6 +37,7 @@ type UseCase interface {
 	Get(ctx context.Context, tenantID, id uuid.UUID) (management.Domain, error)
 	Enroll(ctx context.Context, tenantID uuid.UUID, host string) (management.EnrollResult, error)
 	Verify(ctx context.Context, tenantID, id uuid.UUID) (management.VerifyOutcome, error)
+	RegenerateToken(ctx context.Context, tenantID, id uuid.UUID) (management.Domain, error)
 	SetPaused(ctx context.Context, tenantID, id uuid.UUID, paused bool) (management.Domain, error)
 	Delete(ctx context.Context, tenantID, id uuid.UUID) error
 }
@@ -45,6 +50,12 @@ type Config struct {
 	Now           func() time.Time
 	PrimaryDomain string
 	Logger        *slog.Logger
+	// RateLimiter gates POST .../verify per (tenant, IP). nil disables
+	// rate-limiting (acceptable for tests that don't exercise it).
+	RateLimiter VerifyRateLimiter
+	// Audit receives denied:rate_limited events when RateLimiter fires.
+	// nil silently drops the audit emit; the 429 is still returned.
+	Audit management.AuditLogger
 }
 
 // New returns a Handler. Returns an error for missing required deps.
@@ -79,6 +90,8 @@ func New(cfg Config) (*Handler, error) {
 		now:           now,
 		primaryDomain: primary,
 		logger:        logger,
+		rateLimiter:   cfg.RateLimiter,
+		audit:         cfg.Audit,
 	}, nil
 }
 
@@ -90,7 +103,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /tenant/custom-domains/{id}/instructions", h.serveInstructions)
 	mux.HandleFunc("GET /tenant/custom-domains/{id}/status", h.serveStatusRow)
 	mux.HandleFunc("GET /tenant/custom-domains/{id}/delete", h.serveDeleteModal)
-	mux.HandleFunc("POST /api/customdomains/{id}/verify", h.serveVerify)
+	// SIN-63124 (F-1) wrapped POST /verify through VerifyRateLimitMiddleware.
+	// SIN-63125 (F-2) piggybacks on the same infra so /regenerate-token
+	// shares the (tenant, IP) token bucket — a tenant under abuse cannot
+	// dodge the limiter by alternating between /verify and
+	// /regenerate-token. Same limiter instance, same 10/min burst 5, same
+	// denied:rate_limited audit outcome.
+	limit := VerifyRateLimitMiddleware(h.rateLimiter, h.audit, h.now, h.logger)
+	mux.Handle("POST /api/customdomains/{id}/verify", limit(http.HandlerFunc(h.serveVerify)))
+	mux.Handle("POST /api/customdomains/{id}/regenerate-token", limit(http.HandlerFunc(h.serveRegenerateToken)))
 	mux.HandleFunc("PATCH /api/customdomains/{id}", h.serveSetPaused)
 	mux.HandleFunc("DELETE /api/customdomains/{id}", h.serveDelete)
 }
@@ -108,6 +129,10 @@ type pageData struct {
 	// every script in base.html also has a `src=` that matches the policy
 	// 'self' source.
 	Nonce string
+	// TenantThemeStyle carries the per-request runtime theming inline
+	// style (SIN-63085). base.html emits the <style id="tenant-theme">
+	// slot when this is non-empty.
+	TenantThemeStyle template.CSS
 }
 
 type listPartialData struct {
@@ -126,6 +151,7 @@ type domainView struct {
 	VerifiedAtFmt      string
 	CreatedAtFmt       string
 	VerifiedWithDNSSEC bool
+	CanRegenerateToken bool
 	CSRFToken          string
 }
 
@@ -149,6 +175,7 @@ func (h *Handler) viewFor(d management.Domain, lastErr error, csrf string) domai
 		VerifiedAtFmt:      verified,
 		CreatedAtFmt:       d.CreatedAt.Format("02/01/2006 15:04"),
 		VerifiedWithDNSSEC: d.VerifiedWithDNSSEC,
+		CanRegenerateToken: d.VerifiedAt == nil && d.DeletedAt == nil,
 		CSRFToken:          csrf,
 	}
 }
@@ -174,11 +201,12 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request) {
 		views = append(views, h.viewFor(d, nil, csrf))
 	}
 	data := pageData{
-		Title:         "Domínios personalizados",
-		CSRFToken:     csrf,
-		PrimaryDomain: h.primaryDomain,
-		Domains:       views,
-		Nonce:         csp.Nonce(r.Context()),
+		Title:            "Domínios personalizados",
+		CSRFToken:        csrf,
+		PrimaryDomain:    h.primaryDomain,
+		Domains:          views,
+		Nonce:            csp.Nonce(r.Context()),
+		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := renderTemplate(w, "base", data); err != nil {
@@ -395,6 +423,46 @@ func (h *Handler) serveSetPaused(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serverError(w, r, err)
+		return
+	}
+	h.renderRow(w, r, d, nil, csrf)
+}
+
+// serveRegenerateToken issues a fresh verification token for an unverified
+// domain. Returns the updated <tr> so HTMX swaps it in place.
+//
+// Authorization: tenant-scoped via requireTenant, matching the existing
+// mutating endpoints on this package (serveVerify, serveSetPaused,
+// serveDelete). The route is mounted behind the tenant-context middleware
+// in cmd/server/customdomain_wire.go; no in-package role gate today. A
+// role-aware gate covering /api/customdomains/* writes belongs at the
+// wire-up level so every mutating endpoint inherits it uniformly — see
+// SIN-63125 PR thread.
+func (h *Handler) serveRegenerateToken(w http.ResponseWriter, r *http.Request) {
+	tenant := h.requireTenant(w, r)
+	if tenant == uuid.Nil {
+		return
+	}
+	if err := VerifyCSRF(r, h.csrf); err != nil {
+		h.forbidden(w, r, "CSRF token inválido. Recarregue a página.")
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		http.Error(w, "ID do domínio inválido.", http.StatusBadRequest)
+		return
+	}
+	d, err := h.uc.RegenerateToken(r.Context(), tenant, id)
+	csrf, _ := IssueCSRFToken(w, r, h.csrf)
+	if err != nil {
+		switch {
+		case errors.Is(err, management.ErrAlreadyVerified):
+			http.Error(w, management.CopyPTBR(management.ReasonAlreadyVerified, 0, nil), http.StatusConflict)
+		case errors.Is(err, management.ErrStoreNotFound), errors.Is(err, management.ErrTenantMismatch):
+			h.notFound(w, r)
+		default:
+			h.serverError(w, r, err)
+		}
 		return
 	}
 	h.renderRow(w, r, d, nil, csrf)

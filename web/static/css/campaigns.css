@@ -19,7 +19,7 @@
 }
 
 .campaigns-shell__actions a {
-  background: #1f6feb;
+  background: var(--color-primary, #1f6feb);
   color: #fff;
   padding: 0.5rem 0.85rem;
   border-radius: 4px;
@@ -94,7 +94,7 @@
   border-radius: 999px;
   font-size: 0.85em;
   background: #ddf4ff;
-  color: #0969da;
+  color: var(--color-primary, #0969da);
 }
 
 .campaign-status--expired {
@@ -191,7 +191,7 @@
 }
 
 .campaign-form__actions button {
-  background: #1f6feb;
+  background: var(--color-primary, #1f6feb);
   color: #fff;
   border: none;
   padding: 0.55rem 1.25rem;

@@ -21,7 +21,23 @@ type Store interface {
 	List(ctx context.Context, tenantID uuid.UUID) ([]Domain, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Domain, error)
 	Insert(ctx context.Context, d Domain) (Domain, error)
-	MarkVerified(ctx context.Context, id uuid.UUID, at time.Time, withDNSSEC bool, dnsLogID *uuid.UUID) (Domain, error)
+	// MarkVerified flips verified_at iff the row at id still has
+	// verification_token = expectedToken (compare-and-swap, SIN-63104).
+	// Returns ErrTokenRotated when the row exists but the token differs,
+	// ErrStoreNotFound when the row is missing or soft-deleted.
+	MarkVerified(ctx context.Context, id uuid.UUID, expectedToken string, at time.Time, withDNSSEC bool, dnsLogID *uuid.UUID) (Domain, error)
+	// RotateToken replaces verification_token with newToken and stamps
+	// token_issued_at = issuedAt iff the row at id is still unverified
+	// (verified_at IS NULL) and not soft-deleted (SIN-63125). Verified
+	// rows surface ErrAlreadyVerified — the use-case refuses to rotate a
+	// token that has already proven domain ownership. Missing or soft-
+	// deleted rows surface ErrStoreNotFound.
+	//
+	// Only the verification_token + token_issued_at + updated_at columns
+	// move. Audit lineage (dns_resolution_log_id) is preserved so
+	// forensics can reconstruct "old token never propagated → regenerated
+	// → new token succeeded" without joining the audit log.
+	RotateToken(ctx context.Context, id uuid.UUID, newToken string, issuedAt time.Time) (Domain, error)
 	SetPaused(ctx context.Context, id uuid.UUID, pausedAt *time.Time) (Domain, error)
 	SoftDelete(ctx context.Context, id uuid.UUID, at time.Time) (Domain, error)
 }
@@ -94,6 +110,12 @@ type AuditEvent struct {
 	Outcome  string // "ok", "denied:<reason>", "error"
 	Reason   Reason
 	At       time.Time
+	// TokenFingerprint is a non-reversible identifier for the verification
+	// token bound to this event — first 16 hex chars of SHA-256(token).
+	// Populated by Verify on every token-bound outcome (success, expired,
+	// rotated, mismatch); empty on actions that don't bind a token.
+	// Never carries the raw token. SIN-63104.
+	TokenFingerprint string
 }
 
 // TokenGenerator returns the verification token the tenant must place in

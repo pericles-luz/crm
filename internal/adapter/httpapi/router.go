@@ -69,6 +69,7 @@ import (
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/middleware"
 	httpratelimit "github.com/pericles-luz/crm/internal/adapter/httpapi/ratelimit"
 	"github.com/pericles-luz/crm/internal/iam"
+	"github.com/pericles-luz/crm/internal/iam/audit"
 	domainratelimit "github.com/pericles-luz/crm/internal/iam/ratelimit"
 	"github.com/pericles-luz/crm/internal/obs"
 	"github.com/pericles-luz/crm/internal/tenancy"
@@ -134,6 +135,16 @@ type Deps struct {
 	// *RBACAuthorizer. Nil is permitted for tests that don't gate any
 	// route on RequireAction.
 	Authorizer iam.Authorizer
+	// AuditLogger, when non-nil, is the audit.SplitLogger handed to
+	// router-mounted handlers that need to emit a security ledger row.
+	// SIN-63214 wires the tenant POST /logout handler with this logger
+	// so a SecurityEventLogout row lands in audit_log_security after
+	// the session row is deleted (handler-side seam added in PR #234 /
+	// SIN-63188). Nil keeps the route unchanged — the handler option
+	// short-circuits on a nil writer. Tests that don't exercise audit
+	// leave it at the zero value.
+	AuditLogger audit.SplitLogger
+
 	// Master, when non-zero, mounts the /m/* master-console routes.
 	// Zero value skips the group.
 	Master MasterDeps
@@ -162,6 +173,20 @@ type Deps struct {
 	// behaving exactly as it did pre-SIN-62377 — used by router tests
 	// that don't wire a Touch port.
 	SessionToucher middleware.SessionToucher
+
+	// Theme, when non-nil, mounts the SIN-63085 per-tenant theme
+	// middleware inside the tenanted group (AFTER TenantScope so the
+	// resolved tenant is available on the request context). Every
+	// downstream renderer reads the resolved style via
+	// branding.ThemeStyleFromContext; a nil Theme keeps the chain
+	// behaving as it did pre-SIN-63101 — the helpers fall back to
+	// branding.DefaultThemeStyle. cmd/server constructs the
+	// middleware on top of the SIN-63075 palette store so reads from
+	// the middleware and writes from the SIN-63084 branding admin
+	// handler share state; the same instance is also handed to
+	// webbranding.Deps.ThemeCache so the AC #4 cache-invalidation
+	// seam fires after every save / revert.
+	Theme *middleware.ThemeMiddleware
 
 	// MasterHost is the operator-console hostname (e.g. "master.crm.local")
 	// added to the CSRF Origin/Referer allowlist alongside the resolved
@@ -335,6 +360,72 @@ type Deps struct {
 	//   GET    /c/{slug}
 	WebCampaignPublic http.Handler
 
+	// WebBranding is the HTMX admin UI for the tenant branding surface
+	// (SIN-63084 / Fase 5). Same envelope as WebCatalog / WebAIPolicy:
+	// RequireAuth installs the principal, RequireAction(iam.
+	// ActionTenantBrandingManage) gates every method. Gerente only,
+	// matching the visual-identity blast radius (the palette feeds
+	// every authenticated page via the runtime theme middleware).
+	//
+	// Mounted only when the wire layer supplies a non-nil handler so
+	// existing router tests that don't exercise the branding surface
+	// keep their pre-PR behaviour.
+	//
+	// Routes mounted:
+	//   GET    /branding
+	//   POST   /branding/logo
+	//   POST   /branding/palette/override
+	//   POST   /branding/palette/save
+	//   POST   /branding/palette/revert
+	WebBranding http.Handler
+
+	// WebLGPD is the LGPD data-subject admin surface (SIN-63186 /
+	// Fase 6 PR3). Two routes with DIFFERENT actions: export gates on
+	// ActionTenantLGPDExport, delete on ActionTenantLGPDDelete. Each
+	// inner handler is the per-method func extracted from
+	// internal/web/lgpd.Handler; mounting them separately (rather than
+	// the handler-owned mux) lets the router wrap each verb with the
+	// correct per-route Action constant so the AuditingAuthorizer
+	// records distinct audit_log_security event_type values for an
+	// export attempt vs a delete attempt.
+	//
+	// RateLimit is the shared lgpd_admin policy (10/min/tenant — AC #7)
+	// pre-built by the wire layer. Applied as the OUTERMOST middleware
+	// on both routes so a burst exceeding the cap is rejected before
+	// RequireAuth / RequireAction run — preventing audit-log spam under
+	// the same conditions that trip the limiter. Nil keeps the chain
+	// unchanged so router tests that don't exercise the rate-limit seam
+	// behave the same as the pre-PR build.
+	//
+	// Routes mounted (when Export and Delete are both non-nil):
+	//   GET  /admin/lgpd/export   — ActionTenantLGPDExport
+	//   POST /admin/lgpd/delete   — ActionTenantLGPDDelete
+	WebLGPD LGPDRoutes
+
+	// SIN-63191 / Fase 6 PR4 — public LGPD-disclosure page. Mounted in
+	// the tenanted group BUT outside the authed sub-group (same envelope
+	// as WebCampaignPublic). The page is unauthenticated by design —
+	// LGPD art. 9 obliges the controller to publish the policy in a form
+	// accessible to any data subject; gating it behind login defeats the
+	// obligation.
+	//
+	// Routes mounted:
+	//   GET /privacy
+	WebPublicPrivacy http.Handler
+
+	// SIN-63191 / Fase 6 PR4 — cookie consent banner. Two routes, both
+	// mounted in the tenanted group BUT outside the authed sub-group so
+	// the banner is reachable from public /privacy as well as from
+	// authenticated layouts. The handler self-decides whether to record
+	// a ConsentRegistry row based on whether a Principal happens to be
+	// on the context (set by middleware.Auth when the visitor is
+	// logged in).
+	//
+	// Routes mounted:
+	//   GET  /consent/cookies-banner
+	//   POST /consent/cookies
+	WebConsent http.Handler
+
 	// MasterTenants bundles the three master-console tenant routes
 	// from internal/web/master (SIN-62882 / Fase 2.5 C9). Each slot
 	// is the inner http.Handler the wire layer hands the router;
@@ -351,6 +442,36 @@ type Deps struct {
 	//   POST  /master/tenants            — ActionMasterTenantCreate
 	//   PATCH /master/tenants/{id}/plan  — ActionMasterSubscriptionAssignPlan
 	MasterTenants MasterTenantsRoutes
+}
+
+// LGPDRoutes bundles the two inner handlers and the shared rate-limit
+// middleware for the LGPD data-subject admin surface (SIN-63186). Each
+// http.Handler slot is the per-method func extracted from
+// internal/web/lgpd.Handler so the router can apply a DIFFERENT
+// RequireAction gate on each verb (export vs delete). RateLimit, when
+// non-nil, is applied as the outermost wrapper on both routes so the
+// 10/min/tenant cap is enforced before authz logs anything. Nil slots
+// cause that specific route to be skipped — router tests that don't
+// exercise the LGPD surface keep their pre-PR behaviour.
+//
+// SIN-63191 / Fase 6 PR4 extends the bundle with the HTMX admin pages:
+//
+//   - ContactPage backs GET /admin/contacts/{contactID}/lgpd — gated on
+//     ActionTenantLGPDDelete (the destructive verb owns the surface).
+//   - RequestsPage backs GET /admin/lgpd/requests — gated on
+//     ActionTenantLGPDDelete for the same reason.
+//   - DeleteForm backs POST /admin/lgpd/delete-form — form-encoded twin
+//     of /admin/lgpd/delete so the page degrades to a non-HTMX POST
+//     when JS is off; gated on ActionTenantLGPDDelete.
+//
+// All four UI routes share the lgpd_admin rate limit (RateLimit field).
+type LGPDRoutes struct {
+	Export       http.Handler
+	Delete       http.Handler
+	ContactPage  http.Handler
+	RequestsPage http.Handler
+	DeleteForm   http.Handler
+	RateLimit    func(http.Handler) http.Handler
 }
 
 // MasterTenantsRoutes bundles the three inner handlers for the master
@@ -444,6 +565,13 @@ func NewRouter(deps Deps) http.Handler {
 			tenanted.Use(deps.Metrics.HTTPMetrics(httpTenantOf, httpRouteOf))
 		}
 		tenanted.Use(obs.OTelHTTP("http.request", httpRouteOf, httpTenantSpanEnricher))
+		// SIN-63101 — per-tenant theme attachment. Mounted AFTER
+		// TenantScope so the resolved tenant is on the context; nil
+		// keeps the chain unchanged so router tests that don't wire
+		// the middleware continue rendering DefaultThemeStyle.
+		if deps.Theme != nil {
+			tenanted.Use(deps.Theme.Handler)
+		}
 
 		tenanted.Get("/login", handler.LoginGet)
 
@@ -457,6 +585,25 @@ func NewRouter(deps Deps) http.Handler {
 		// cmd/server/campaigns_public_wire.go.
 		if deps.WebCampaignPublic != nil {
 			tenanted.Method(http.MethodGet, "/c/{slug}", deps.WebCampaignPublic)
+		}
+
+		// SIN-63191 / Fase 6 PR4 — public LGPD-disclosure page.
+		// Unauthenticated by design (LGPD art. 9). Mounted alongside
+		// /c/{slug} so middleware.TenantScope resolves the tenant from
+		// the request host before the renderer runs.
+		if deps.WebPublicPrivacy != nil {
+			tenanted.Method(http.MethodGet, "/privacy", deps.WebPublicPrivacy)
+		}
+
+		// SIN-63191 / Fase 6 PR4 — cookie consent banner. Same
+		// rationale as /privacy: the banner must be reachable to
+		// anonymous visitors on /privacy as well as to logged-in
+		// users on every authenticated layout, so the routes live
+		// outside the authed sub-group. ConsentRegistry recording
+		// happens only when iam.PrincipalFromContext succeeds.
+		if deps.WebConsent != nil {
+			tenanted.Method(http.MethodGet, "/consent/cookies-banner", deps.WebConsent)
+			tenanted.Method(http.MethodPost, "/consent/cookies", deps.WebConsent)
 		}
 
 		loginPost := http.Handler(handler.LoginPost(handler.LoginConfig{
@@ -506,7 +653,18 @@ func NewRouter(deps Deps) http.Handler {
 				)
 			}
 			authed.Method(http.MethodGet, "/hello-tenant", helloTenant)
-			authed.Method(http.MethodPost, "/logout", handler.Logout(deps.IAM))
+			// SIN-63214 — opt the tenant /logout handler into the
+			// SecurityEventLogout audit row added in PR #234. Both
+			// options are nil-safe: WithLogoutAudit(nil) leaves the
+			// handler in its pre-PR shape (no audit write) and
+			// WithLogoutLogger(nil) falls back to slog.Default()
+			// inside the constructor. Router tests that don't wire
+			// either dep keep their pre-PR behaviour.
+			authed.Method(http.MethodPost, "/logout", handler.Logout(
+				deps.IAM,
+				handler.WithLogoutAudit(deps.AuditLogger),
+				handler.WithLogoutLogger(deps.Logger),
+			))
 
 			// SIN-62855 — HTMX identity-split UI (SIN-62799 follow-up).
 			// Mount inside RequireAuth so the inner handler runs with an
@@ -656,6 +814,110 @@ func NewRouter(deps Deps) http.Handler {
 				authed.Method(http.MethodPost, "/campaigns", webCampaigns)
 				authed.Method(http.MethodGet, "/campaigns/{slug}", webCampaigns)
 				authed.Method(http.MethodGet, "/campaigns/{slug}/clicks", webCampaigns)
+			}
+
+			// SIN-63084 — HTMX branding admin (Fase 5). Same envelope
+			// as WebCatalog / WebAIPolicy: RequireAuth installs the
+			// principal, RequireAction(ActionTenantBrandingManage)
+			// gates every method. The page is read-then-write; chi
+			// dispatches by verb so the GET form short-circuits CSRF
+			// while the POSTs run the full csrfmw chain.
+			if deps.WebBranding != nil {
+				webBranding := http.Handler(deps.WebBranding)
+				if deps.Authorizer != nil {
+					webBranding = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantBrandingManage, nil)(webBranding),
+					)
+				} else {
+					webBranding = middleware.RequireAuth(middleware.RequireAuthDeps{})(webBranding)
+				}
+				authed.Method(http.MethodGet, "/branding", webBranding)
+				authed.Method(http.MethodPost, "/branding/logo", webBranding)
+				authed.Method(http.MethodPost, "/branding/palette/override", webBranding)
+				authed.Method(http.MethodPost, "/branding/palette/save", webBranding)
+				authed.Method(http.MethodPost, "/branding/palette/revert", webBranding)
+			}
+
+			// SIN-63186 — LGPD data-subject admin surface (Fase 6 PR3).
+			// Each verb is wrapped with the per-route Action constant
+			// from ADR 0090 so a tenant-role user hitting either route
+			// without RoleTenantGerente gets a 403 + audit_log_security
+			// row tagged with the specific event_type (export vs
+			// forget). Rate-limit (AC #7, 10/min/tenant via lgpd_admin
+			// policy) wraps OUTSIDE RequireAction so a burst is
+			// rejected before authz logs the deny — preventing
+			// audit-log spam under the same conditions that trip the
+			// limiter. When Authorizer is nil (router tests that don't
+			// exercise the authz seam) the gate skips and the inner
+			// handler still runs with a Principal.
+			if deps.WebLGPD.Export != nil && deps.WebLGPD.Delete != nil {
+				exportH := http.Handler(deps.WebLGPD.Export)
+				deleteH := http.Handler(deps.WebLGPD.Delete)
+				if deps.Authorizer != nil {
+					exportH = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantLGPDExport, nil)(exportH),
+					)
+					deleteH = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantLGPDDelete, nil)(deleteH),
+					)
+				} else {
+					exportH = middleware.RequireAuth(middleware.RequireAuthDeps{})(exportH)
+					deleteH = middleware.RequireAuth(middleware.RequireAuthDeps{})(deleteH)
+				}
+				if deps.WebLGPD.RateLimit != nil {
+					exportH = deps.WebLGPD.RateLimit(exportH)
+					deleteH = deps.WebLGPD.RateLimit(deleteH)
+				}
+				authed.Method(http.MethodGet, "/admin/lgpd/export", exportH)
+				authed.Method(http.MethodPost, "/admin/lgpd/delete", deleteH)
+			}
+
+			// SIN-63191 / Fase 6 PR4 — HTMX admin pages. All three
+			// share the lgpd_admin rate limit and the
+			// ActionTenantLGPDDelete gate (the destructive verb owns
+			// the surface — an operator who can read the requests list
+			// is the same one who can issue a deletion).
+			if deps.WebLGPD.ContactPage != nil {
+				h := http.Handler(deps.WebLGPD.ContactPage)
+				if deps.Authorizer != nil {
+					h = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantLGPDDelete, nil)(h),
+					)
+				} else {
+					h = middleware.RequireAuth(middleware.RequireAuthDeps{})(h)
+				}
+				if deps.WebLGPD.RateLimit != nil {
+					h = deps.WebLGPD.RateLimit(h)
+				}
+				authed.Method(http.MethodGet, "/admin/contacts/{contactID}/lgpd", h)
+			}
+			if deps.WebLGPD.RequestsPage != nil {
+				h := http.Handler(deps.WebLGPD.RequestsPage)
+				if deps.Authorizer != nil {
+					h = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantLGPDDelete, nil)(h),
+					)
+				} else {
+					h = middleware.RequireAuth(middleware.RequireAuthDeps{})(h)
+				}
+				if deps.WebLGPD.RateLimit != nil {
+					h = deps.WebLGPD.RateLimit(h)
+				}
+				authed.Method(http.MethodGet, "/admin/lgpd/requests", h)
+			}
+			if deps.WebLGPD.DeleteForm != nil {
+				h := http.Handler(deps.WebLGPD.DeleteForm)
+				if deps.Authorizer != nil {
+					h = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantLGPDDelete, nil)(h),
+					)
+				} else {
+					h = middleware.RequireAuth(middleware.RequireAuthDeps{})(h)
+				}
+				if deps.WebLGPD.RateLimit != nil {
+					h = deps.WebLGPD.RateLimit(h)
+				}
+				authed.Method(http.MethodPost, "/admin/lgpd/delete-form", h)
 			}
 
 			// SIN-62963 — HTMX PIX-invoice surface (Fase 4). Reuses

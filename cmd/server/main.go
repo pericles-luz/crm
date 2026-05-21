@@ -40,6 +40,7 @@ import (
 	"github.com/pericles-luz/crm/internal/customdomain/ratelimit/sliding"
 	"github.com/pericles-luz/crm/internal/customdomain/tls_ask"
 	"github.com/pericles-luz/crm/internal/http/middleware/csp"
+	"github.com/pericles-luz/crm/internal/obs"
 	"github.com/pericles-luz/crm/internal/version"
 )
 
@@ -263,18 +264,52 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 	webFunnelRulesHandler, webFunnelRulesCleanup := buildWebFunnelRulesHandler(ctx, getenv)
 	defer webFunnelRulesCleanup()
 
+	// SIN-63105 — process-wide obs.Metrics constructed once at boot
+	// and shared by the SIN-63085 theme middleware (via
+	// buildBrandingStack) and the SIN-62218 /metrics scrape endpoint
+	// + per-route HTTPMetrics middleware (via httpapi.Deps.Metrics).
+	// One instance keeps tenant_theme_cache_hits_total reachable on
+	// the same /metrics endpoint that already exposes
+	// http_requests_total et al.
+	metrics := obs.NewMetrics()
+
+	// SIN-63084 + SIN-63085 + SIN-63101 — HTMX branding admin AND the
+	// per-tenant theme middleware. Both halves share the in-memory
+	// PaletteStore so a SIN-63084 save is visible to the next theme-
+	// middleware lookup without TTL wait (AC #4 of SIN-63085). No DB
+	// dependency today; cleanup is a no-op but stays for orthogonality.
+	// SIN-63105 passes the boot-time obs.Metrics so the middleware's
+	// ObserveThemeCacheLookup hook increments tenant_theme_cache_hits_total
+	// against the same registry that backs /metrics.
+	brandingStack := buildBrandingStack(slog.Default(), metrics)
+	defer brandingStack.Cleanup()
+
+	// SIN-63191 / Fase 6 PR4 — public LGPD-disclosure page + cookie
+	// consent banner. Both wires fail-soft when DATABASE_URL is unset;
+	// the routes simply stay unmounted in that case.
+	webPublicPrivacyHandler, webPublicPrivacyCleanup := buildPublicPrivacyHandler(ctx, getenv)
+	defer webPublicPrivacyCleanup()
+
+	webConsentHandler, webConsentCleanup := buildConsentHandler(ctx, getenv)
+	defer webConsentCleanup()
+
 	// SIN-62527 / SIN-62217 — IAM chi handler (login, logout, hello-tenant,
 	// /m/*, metrics). Mounted before the custom-domain catch-all so
 	// Go's ServeMux longer-prefix rule keeps IAM routes out of the
 	// catch-all handler.
 	iamHandler, iamCleanup := buildIAMHandler(ctx, getenv, iamHandlerOpts{
-		WebContacts:    webContactsHandler,
-		WebFunnel:      webFunnelHandler,
-		WebPrivacy:     webPrivacyHandler,
-		WebAIPolicy:    webAIPolicyHandler,
-		WebCatalog:     webCatalogHandler,
-		WebCampaigns:   webCampaignsHandler,
-		WebFunnelRules: webFunnelRulesHandler,
+		WebContacts:      webContactsHandler,
+		WebFunnel:        webFunnelHandler,
+		WebPrivacy:       webPrivacyHandler,
+		WebAIPolicy:      webAIPolicyHandler,
+		WebCatalog:       webCatalogHandler,
+		WebCampaigns:     webCampaignsHandler,
+		WebFunnelRules:   webFunnelRulesHandler,
+		WebBranding:      brandingStack.Handler,
+		WebPublicPrivacy: webPublicPrivacyHandler,
+		WebConsent:       webConsentHandler,
+		Theme:            brandingStack.Theme,
+		Metrics:          metrics,
 	})
 	defer iamCleanup()
 	if iamHandler != nil {
