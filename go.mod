@@ -28,7 +28,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.52.0
-	golang.org/x/image v0.40.0
+	golang.org/x/image v0.41.0
 	golang.org/x/tools v0.44.0
 	rsc.io/qr v0.2.0
 )
