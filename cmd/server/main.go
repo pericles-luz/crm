@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -378,6 +379,16 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 		return fmt.Errorf("inbox channel provider wire-up: %w", err)
 	}
 	LogInboxChannelProviderBoot(slog.Default(), inboxChannelProvider)
+	// SIN-63825 / W6: expose the resolved provider on /health so the
+	// staging smoke (scripts/ci/stg-smoke-inbox.sh) can pre-check
+	// `inbox_channel_provider == "llmcustomer"` before exercising the
+	// operator loop. Stored through sync/atomic so sibling tests that
+	// race runWith against /health probes (cmd/server has both in the
+	// same package) do not trip the race detector — production only
+	// writes once at boot, but the test binary exercises both paths
+	// concurrently.
+	resolvedProvider := inboxChannelProvider.String()
+	inboxChannelProviderForHealth.Store(&resolvedProvider)
 
 	// SIN-63826 / SIN-63793 W3: parse PERSONA_LLM_PROVIDER, hard-fail
 	// boot when the openrouter persona is selected without
@@ -542,12 +553,36 @@ func runInternal(ctx context.Context, addr string, handler http.Handler) error {
 	return nil
 }
 
+// inboxChannelProviderForHealth carries the resolved
+// INBOX_CHANNEL_PROVIDER value that runWith publishes at boot. It is
+// read by healthHandler on every /health request and written once by
+// runWith before the listener accepts connections. The atomic pointer
+// guarantees a data-race-free read/write across the sibling cmd/server
+// tests that exercise runWith and healthHandler concurrently (the
+// production happens-before via http.Server's accept-loop does not
+// extend across those tests). A nil load — observed by a /health probe
+// issued before runWith publishes — yields the legacy two-field JSON
+// shape via the WithInboxChannelProvider("") omitempty path.
+// SIN-63825 / SIN-63793 W6.
+var inboxChannelProviderForHealth atomic.Pointer[string]
+
 // healthHandler is the public /health closure constructed from
-// handler.Health with the build-time commit SHA. It is wired here so the
-// cd-stg smoke gate (SIN-63146) can compare the served commit_sha against
-// the GitHub workflow head SHA. See SIN-63165 for the wireup-shadow bug
+// handler.Health with the build-time commit SHA and the resolved inbox
+// channel provider. It is wired here so the cd-stg smoke gate
+// (SIN-63146) can compare the served commit_sha against the GitHub
+// workflow head SHA, and the SIN-63825 inbox smoke gate can read
+// .inbox_channel_provider. See SIN-63165 for the wireup-shadow bug
 // this var fixes.
-var healthHandler = handler.Health(version.CommitSHA())
+var healthHandler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
+	var provider string
+	if p := inboxChannelProviderForHealth.Load(); p != nil {
+		provider = *p
+	}
+	handler.Health(
+		version.CommitSHA(),
+		handler.WithInboxChannelProvider(provider),
+	).ServeHTTP(w, r)
+}
 
 // newMux builds the public stdlib mux. /health is mounted here on the
 // stdlib ServeMux — NOT inside the chi router in iam_wire.go's iamRoutes.
