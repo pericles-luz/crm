@@ -3,6 +3,7 @@ package usermfa
 import (
 	"context"
 	"errors"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,8 +15,10 @@ import (
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/loginhandler"
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/sessioncookie"
 	"github.com/pericles-luz/crm/internal/adapter/httpapi/views"
+	"github.com/pericles-luz/crm/internal/branding"
 	"github.com/pericles-luz/crm/internal/http/middleware/csp"
 	"github.com/pericles-luz/crm/internal/iam"
+	"github.com/pericles-luz/crm/internal/tenancy"
 )
 
 // DefaultPendingTTL is the lifetime of a pre-MFA pending row. The
@@ -184,15 +187,30 @@ func LoginPost(cfg LoginConfig) http.HandlerFunc {
 func renderLoginError(w http.ResponseWriter, r *http.Request, next string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnauthorized)
+	// SIN-63941 / UX-F4 — the MFA-aware credential-failure path renders
+	// the same views.Login template as the legacy handler, so the data
+	// struct grew TenantName/TenantLogo/WhiteLabel/TenantThemeStyle to
+	// keep the card branded after a bad-password attempt. tenancy is
+	// already on the request via middleware.TenantScope; logo and
+	// white-label remain placeholders until the tenant-settings read
+	// port (follow-up issue) is wired here too.
 	data := struct {
-		Next      string
-		Error     string
-		CSRFToken string
-		CSPNonce  string
+		Next             string
+		Error            string
+		CSRFToken        string
+		CSPNonce         string
+		TenantName       string
+		TenantLogo       string
+		WhiteLabel       bool
+		TenantThemeStyle template.CSS
 	}{
-		Next:     next,
-		Error:    "Email ou senha inválidos.",
-		CSPNonce: csp.Nonce(r.Context()),
+		Next:             next,
+		Error:            "Email ou senha inválidos.",
+		CSPNonce:         csp.Nonce(r.Context()),
+		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
+	}
+	if t, err := tenancy.FromContext(r.Context()); err == nil && t != nil {
+		data.TenantName = t.Name
 	}
 	_ = views.Login.ExecuteTemplate(w, "layout", data)
 }

@@ -146,6 +146,98 @@ func cspNonce(data any) string {
 	return ""
 }
 
+// loginTenantName is the FuncMap helper that reads .TenantName from
+// the page data via reflection. SIN-63941 / UX-F4 added the tenant
+// identity to the /login surface so a B2B operator hitting acme.crm
+// sees the tenant brand before authenticating. Reflection keeps the
+// helper compatible with the legacy LoginViewModel shapes used by the
+// existing views_test.go fixtures.
+//
+// Returns:
+//   - the field value when it exists and is a string,
+//   - empty string otherwise — the template treats an empty name as
+//     "no tenant identity to show" and falls back to a generic title.
+//
+// Pure: no request state, no globals, safe across goroutines.
+func loginTenantName(data any) string {
+	return stringFieldOnPageData(data, "TenantName")
+}
+
+// loginTenantLogo is the FuncMap helper that reads .TenantLogo from
+// the page data via reflection. The login template treats a non-empty
+// value as an absolute URL into the cookieless static origin (see
+// internal/media/serve/url.go) and renders the <img>; an empty value
+// renders the "CRM" word-mark fallback.
+//
+// Pure: no request state, no globals, safe across goroutines.
+func loginTenantLogo(data any) string {
+	return stringFieldOnPageData(data, "TenantLogo")
+}
+
+// loginWhiteLabel is the FuncMap helper that reads .WhiteLabel from
+// the page data via reflection. The login template suppresses the
+// "Powered by CRM Sindireceita" footer when true so a white-label
+// tenant does not advertise the underlying platform on its pre-auth
+// surface.
+//
+// Returns:
+//   - the field value when it exists and is a bool,
+//   - false otherwise (fail-open to the platform marker so default
+//     tenants always show attribution).
+//
+// Pure: no request state, no globals, safe across goroutines.
+func loginWhiteLabel(data any) bool {
+	if data == nil {
+		return false
+	}
+	v := reflect.ValueOf(data)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	f := v.FieldByName("WhiteLabel")
+	if !f.IsValid() {
+		return false
+	}
+	if b, ok := f.Interface().(bool); ok {
+		return b
+	}
+	return false
+}
+
+// stringFieldOnPageData centralises the page-data string field lookup
+// pattern shared by the new login helpers. The cspNonce helper above
+// pre-dates this refactor and stays inline so existing tests/fixtures
+// that depend on its exact lookup contract do not shift.
+func stringFieldOnPageData(data any, field string) string {
+	if data == nil {
+		return ""
+	}
+	v := reflect.ValueOf(data)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	f := v.FieldByName(field)
+	if !f.IsValid() {
+		return ""
+	}
+	if s, ok := f.Interface().(string); ok {
+		return s
+	}
+	return ""
+}
+
 //go:embed *.html
 var assets embed.FS
 
@@ -162,6 +254,9 @@ var csrfFuncs = template.FuncMap{
 	"tenantThemeStyle": tenantThemeStyle,
 	"cspNonce":         cspNonce,
 	"helloSurfaces":    helloSurfaces,
+	"loginTenantName":  loginTenantName,
+	"loginTenantLogo":  loginTenantLogo,
+	"loginWhiteLabel":  loginWhiteLabel,
 }
 
 // Login renders GET /login and the re-rendered POST /login form on

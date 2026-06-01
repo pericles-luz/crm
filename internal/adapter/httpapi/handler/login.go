@@ -16,7 +16,54 @@ import (
 	"github.com/pericles-luz/crm/internal/branding"
 	"github.com/pericles-luz/crm/internal/http/middleware/csp"
 	"github.com/pericles-luz/crm/internal/iam"
+	"github.com/pericles-luz/crm/internal/tenancy"
 )
+
+// loginViewData is the data shape the views.Login template renders
+// against on every /login pass (GET and credential-failure POST). It
+// is private to this package — the template reads fields by name via
+// the views.go reflection helpers (loginTenantName / loginTenantLogo /
+// loginWhiteLabel) so a future caller adding fields here does not need
+// to touch the template.
+//
+// Tenant identity (Name, Logo, WhiteLabel) is plumbed from
+// tenancy.FromContext so a B2B operator hitting acme.crm sees the
+// tenant brand before authenticating; SanitizeNext-clamped Next plus
+// the iam-minted CSRFToken cover the credential-failure POST round
+// trip. TenantLogo / WhiteLabel currently fall back to zero values —
+// the tenant-settings read-port that fills them in lives in a
+// follow-up issue, and the template renders gracefully when both are
+// empty (word-mark fallback + "Powered by CRM Sindireceita" footer).
+type loginViewData struct {
+	Next             string
+	Error            string
+	CSRFToken        string
+	TenantThemeStyle template.CSS
+	CSPNonce         string
+	TenantName       string
+	TenantLogo       string
+	WhiteLabel       bool
+}
+
+// buildLoginViewData composes the loginViewData for the current
+// request. The pre-auth context already carries the tenant (the
+// middleware.TenantScope link in the defence chain runs ABOVE /login),
+// so a missing tenant means a misrouted request and we fall back to
+// empty branding rather than panicking. branding.ThemeStyleFromContext
+// returns the platform default palette on miss, so the inline
+// <style id="tenant-theme"> always lands with readable contrast.
+func buildLoginViewData(r *http.Request, next, errMsg string) loginViewData {
+	d := loginViewData{
+		Next:             next,
+		Error:            errMsg,
+		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
+		CSPNonce:         csp.Nonce(r.Context()),
+	}
+	if t, err := tenancy.FromContext(r.Context()); err == nil && t != nil {
+		d.TenantName = t.Name
+	}
+	return d
+}
 
 // LoginAuthenticator is the slice of iam.Service the login handler needs.
 // Keeping it narrow lets tests inject a fake without dragging the full
@@ -51,17 +98,7 @@ type LoginConfig struct {
 // preserved on the form so a successful POST bounces the user back to the
 // originally-requested URL.
 func LoginGet(w http.ResponseWriter, r *http.Request) {
-	data := struct {
-		Next             string
-		Error            string
-		CSRFToken        string
-		TenantThemeStyle template.CSS
-		CSPNonce         string
-	}{
-		Next:             SanitizeNext(r.URL.Query().Get("next")),
-		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
-		CSPNonce:         csp.Nonce(r.Context()),
-	}
+	data := buildLoginViewData(r, SanitizeNext(r.URL.Query().Get("next")), "")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := views.Login.ExecuteTemplate(w, "layout", data); err != nil {
 		http.Error(w, "render error", http.StatusInternalServerError)
@@ -127,18 +164,7 @@ func LoginPost(cfg LoginConfig) http.HandlerFunc {
 func renderLoginError(w http.ResponseWriter, r *http.Request, next string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnauthorized)
-	data := struct {
-		Next             string
-		Error            string
-		CSRFToken        string
-		TenantThemeStyle template.CSS
-		CSPNonce         string
-	}{
-		Next:             next,
-		Error:            "Email ou senha inválidos.",
-		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
-		CSPNonce:         csp.Nonce(r.Context()),
-	}
+	data := buildLoginViewData(r, next, "Email ou senha inválidos.")
 	_ = views.Login.ExecuteTemplate(w, "layout", data)
 }
 
