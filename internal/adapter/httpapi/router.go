@@ -465,6 +465,22 @@ type Deps struct {
 	//   PATCH /master/tenants/{id}/plan  — ActionMasterSubscriptionAssignPlan
 	MasterTenants MasterTenantsRoutes
 
+	// Impersonation bundles the SIN-63958 session-bound impersonation
+	// envelope routes (Start, End, Feed). The bundle is a sibling of
+	// MasterTenants because the impersonation surface has heterogeneous
+	// auth posture (Start = ActionMasterTenantImpersonate; End =
+	// RoleMaster only so the operator can exit a stale envelope; Feed
+	// = RoleMaster + owner check). Conflating with MasterTenants would
+	// force the uniform RequireAction pattern onto handlers that need
+	// looser / stricter gates.
+	//
+	// The optional middleware ImpersonationFromSession (also non-nil
+	// when this bundle is wired) is applied on routes that consume the
+	// active envelope. Nil slots are skipped — router tests and deploys
+	// that don't wire the impersonation adapter keep their pre-PR
+	// behaviour.
+	Impersonation ImpersonationRoutes
+
 	// UserMFA is the SIN-63361 user-side TOTP enforcement surface.
 	// When LoginPost is non-nil the router REPLACES the legacy
 	// handler.LoginPost mount on POST /login with the MFA-aware
@@ -480,6 +496,17 @@ type Deps struct {
 	// exercise the MFA surface keep their pre-PR behaviour and the
 	// legacy single-step handler.LoginPost stays mounted.
 	UserMFA UserMFARoutes
+
+	// CustomDomainEnabled reports whether the public-mux custom-domain
+	// handler is mounted in the current process (SIN-62259). The actual
+	// route subtree (`/tenant/custom-domains*`) lives on the public mux,
+	// not in this chi router, so there is no http.Handler slot here —
+	// only the boolean presence signal. SIN-63940 / UX-F3 surfaces the
+	// flag on /hello-tenant so an operator who has CUSTOM_DOMAIN_UI_
+	// ENABLED=1 in their env sees the link go live; when the env flag
+	// is unset the card renders disabled with the standard "Indisponível
+	// neste ambiente" hint.
+	CustomDomainEnabled bool
 }
 
 // LGPDRoutes bundles the two inner handlers and the shared rate-limit
@@ -552,6 +579,13 @@ type MasterTenantsRoutes struct {
 	List       http.Handler
 	Create     http.Handler
 	AssignPlan http.Handler
+	// Detail backs GET /master/tenants/{id} (SIN-63956 / spec §9.5).
+	// Hosts the "Impersonar tenant" trigger + reason modal. Gated on
+	// ActionMasterTenantRead — same as List — because the page does
+	// not reveal anything the list view doesn't already, and the
+	// impersonation handler enforces its own ActionMasterTenantImpersonate
+	// gate on the actual envelope POST.
+	Detail http.Handler
 	// SIN-62884 C10 — grants surface. Each handler is conditionally
 	// mounted; nil slots are skipped so deploys that haven't wired
 	// the wallet adapter behave the same as the pre-C10 router. The
@@ -562,6 +596,47 @@ type MasterTenantsRoutes struct {
 	GrantsNew    http.Handler
 	GrantsCreate http.Handler
 	GrantsRevoke http.Handler
+	// SIN-63605 C? — 4-eyes approval surface for over-cap grants.
+	// Each slot is the inner handler from internal/web/master; the
+	// router gates each verb behind its own RequireAction action
+	// constant (master.grant.request.create / .approve / .reject).
+	// The four POST verbs are additionally expected to be wrapped
+	// with mastermfa.RequireRecentMFA at the wire layer before being
+	// assigned here; the read-only GET routes ride the existing
+	// master-MFA session bit only.
+	GrantRequestsCreate  http.Handler // POST /master/tenants/{id}/grants/requests
+	GrantRequestsList    http.Handler // GET  /master/grants/requests
+	GrantRequestsShow    http.Handler // GET  /master/grants/requests/{id}
+	GrantRequestsApprove http.Handler // POST /master/grants/requests/{id}/approve
+	GrantRequestsReject  http.Handler // POST /master/grants/requests/{id}/reject
+}
+
+// ImpersonationRoutes is the SIN-63958 Scope 3 surface — three master-
+// console handlers that drive the session-bound impersonation envelope:
+//
+//	Start: POST /master/tenants/{id}/impersonate
+//	       RequireAuth → RequireAction(ActionMasterTenantImpersonate) →
+//	       handler.
+//
+//	End:   POST /master/impersonation/end
+//	       RequireAuth → RequireRoleMaster → handler. NOT behind
+//	       ImpersonationFromSession so an expired operator can still
+//	       exit a stale envelope (AC #3 from SIN-63955; spec §2.7).
+//
+//	Feed:  GET  /master/impersonation/feed
+//	       RequireAuth → RequireRoleMaster → handler. Owner check is
+//	       enforced inside the handler.
+//
+// FromSession is the middleware that consumes any active envelope on
+// the master subtree. Mounted by NewRouter as a wrapper on every
+// /master/* route except End; nil means "no impersonation wired" and
+// the wrapper is skipped (the legacy header-based middleware on /master/
+// stays the only path).
+type ImpersonationRoutes struct {
+	Start       http.Handler
+	End         http.Handler
+	Feed        http.Handler
+	FromSession func(http.Handler) http.Handler
 }
 
 // NewRouter wires the chi router with the canonical middleware chain and
@@ -767,6 +842,24 @@ func NewRouter(deps Deps) http.Handler {
 				PrivacyEnabled:     deps.WebPrivacy != nil,
 				AIPolicyEnabled:    deps.WebAIPolicy != nil,
 				ConsentEnabled:     deps.WebConsent != nil,
+				// SIN-63940 / UX-F3 — Fase 6 surfaces. Each flag reads
+				// the matching dep slot the wire layer fills in
+				// cmd/server; an empty/nil dep falls back to a disabled
+				// card on the dashboard ("Indisponível neste ambiente —
+				// verifique configuração do servidor.") rather than a
+				// dead link, so the gap is visible to the operator.
+				// The non-nil Extended pointer is the explicit opt-in
+				// to the 13-entry index — legacy router_test.go fixtures
+				// that build HelloTenantDeps{} keep the 7-entry SIN-
+				// 63774 baseline.
+				Extended: &handler.HelloTenantExtendedDeps{
+					InboxEnabled:        deps.WebInbox != nil,
+					BillingEnabled:      deps.WebBillingInvoices != nil,
+					BrandingEnabled:     deps.WebBranding != nil,
+					LGPDEnabled:         deps.WebLGPD.RequestsPage != nil,
+					MFAEnabled:          deps.UserMFA.Setup != nil,
+					CustomDomainEnabled: deps.CustomDomainEnabled,
+				},
 			}))
 			if deps.Authorizer != nil {
 				helloTenant = middleware.RequireAuth(middleware.RequireAuthDeps{})(
@@ -1113,6 +1206,14 @@ func NewRouter(deps Deps) http.Handler {
 					)
 					authed.Method(http.MethodPatch, "/master/tenants/{id}/plan", assignH)
 				}
+				// SIN-63956 — tenant detail page (spec §9.5). Same
+				// gating as the list page (ActionMasterTenantRead).
+				if deps.MasterTenants.Detail != nil {
+					detailH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterTenantRead, nil)(deps.MasterTenants.Detail),
+					)
+					authed.Method(http.MethodGet, "/master/tenants/{id}", detailH)
+				}
 				// SIN-62884 — HTMX master/grants UI (Fase 2.5 C10).
 				// Same gating envelope as the tenants surface. The
 				// GET form gates on the free-period action (master-
@@ -1142,6 +1243,89 @@ func NewRouter(deps Deps) http.Handler {
 						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantCourtesyRevoke, nil)(deps.MasterTenants.GrantsRevoke),
 					)
 					authed.Method(http.MethodPost, "/master/grants/{id}/revoke", gRevoke)
+				}
+				// SIN-63605 — 4-eyes approval surface. Same gating
+				// envelope as the C10 grants routes: RequireAuth →
+				// RequireAction → handler. The wire layer wraps the
+				// POST verbs with mastermfa.RequireRecentMFA before
+				// installing them on the slot, mirroring the
+				// GrantsCreate/GrantsRevoke pattern.
+				if deps.MasterTenants.GrantRequestsCreate != nil {
+					grqCreate := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantRequestCreate, nil)(deps.MasterTenants.GrantRequestsCreate),
+					)
+					authed.Method(http.MethodPost, "/master/tenants/{id}/grants/requests", grqCreate)
+				}
+				if deps.MasterTenants.GrantRequestsList != nil {
+					grqList := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantRequestApprove, nil)(deps.MasterTenants.GrantRequestsList),
+					)
+					authed.Method(http.MethodGet, "/master/grants/requests", grqList)
+				}
+				if deps.MasterTenants.GrantRequestsShow != nil {
+					grqShow := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantRequestApprove, nil)(deps.MasterTenants.GrantRequestsShow),
+					)
+					authed.Method(http.MethodGet, "/master/grants/requests/{id}", grqShow)
+				}
+				if deps.MasterTenants.GrantRequestsApprove != nil {
+					grqApprove := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantRequestApprove, nil)(deps.MasterTenants.GrantRequestsApprove),
+					)
+					authed.Method(http.MethodPost, "/master/grants/requests/{id}/approve", grqApprove)
+				}
+				if deps.MasterTenants.GrantRequestsReject != nil {
+					grqReject := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterGrantRequestReject, nil)(deps.MasterTenants.GrantRequestsReject),
+					)
+					authed.Method(http.MethodPost, "/master/grants/requests/{id}/reject", grqReject)
+				}
+
+				// SIN-63958 / master-impersonation-spec §1.4 — session-
+				// bound impersonation envelope. Three master routes
+				// with heterogeneous gating:
+				//
+				//   POST /master/tenants/{id}/impersonate
+				//     RequireAuth → RequireAction(ActionMasterTenantImpersonate)
+				//     → FromSession → handler. The FromSession wrapper
+				//     before the handler lets Start fire its audit row
+				//     with the freshly-minted envelope id already on
+				//     ctx for any inner authz event.
+				//
+				//   POST /master/impersonation/end
+				//     RequireAuth → RequireRoleMaster → handler. NO
+				//     FromSession wrapper so an expired or already-
+				//     ended envelope can still exit cleanly.
+				//
+				//   GET /master/impersonation/feed
+				//     RequireAuth → RequireRoleMaster → FromSession →
+				//     handler. The handler enforces the owner check
+				//     (master_user_id == principal.UserID).
+				if deps.Impersonation.Start != nil {
+					inner := deps.Impersonation.Start
+					if deps.Impersonation.FromSession != nil {
+						inner = deps.Impersonation.FromSession(inner)
+					}
+					startH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionMasterTenantImpersonate, nil)(inner),
+					)
+					authed.Method(http.MethodPost, "/master/tenants/{id}/impersonate", startH)
+				}
+				if deps.Impersonation.End != nil {
+					endH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireRoleMaster()(deps.Impersonation.End),
+					)
+					authed.Method(http.MethodPost, "/master/impersonation/end", endH)
+				}
+				if deps.Impersonation.Feed != nil {
+					inner := deps.Impersonation.Feed
+					if deps.Impersonation.FromSession != nil {
+						inner = deps.Impersonation.FromSession(inner)
+					}
+					feedH := middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireRoleMaster()(inner),
+					)
+					authed.Method(http.MethodGet, "/master/impersonation/feed", feedH)
 				}
 			}
 		})

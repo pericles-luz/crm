@@ -64,10 +64,10 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: set up buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -75,7 +75,7 @@ jobs:
 
       - name: build & push image
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
           context: .
           file: Dockerfile
@@ -185,6 +185,84 @@ jobs:
           printf '%s\n' "$STG_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      # SIN-63350 — preflight: detect cosign missing on VPS before deploy.
+      #
+      # The wrapper at /opt/crm/stg/bin/deploy.sh runs `command -v cosign`
+      # before both `deploy` and `migrate-up`. If cosign is not on the
+      # non-interactive SSH PATH (typical case: cosign installed at
+      # /usr/local/bin/cosign but the SSH `command="…"` authorized_keys
+      # constraint inherits a stripped PATH), the wrapper exits 67 with
+      # `stg-deploy: cosign not found in PATH`. cd-stg run 26334123677
+      # tripped exactly this: SIN-63335 / SIN-63348 forensics showed the
+      # failure was at `deploy via ssh`, NOT at migrate-up — the existing
+      # wrapper-stale preflight (between /health and migrate-up) runs too
+      # late to catch it.
+      #
+      # This preflight invokes the SIN-63350 `preflight` verb on the
+      # wrapper (deploy/scripts/stg-deploy.sh). The verb takes no
+      # image-ref, checks `command -v cosign`, and exits 0 (cosign
+      # present) or 67 (cosign missing). SSH propagates the exit code so
+      # the workflow goes red here, with the remediation block below
+      # naming the canonical install procedure in
+      # docs/deploy/staging.md §VPS-bootstrap (lines 437-474).
+      #
+      # Authentication / surface area: same locked-down SSH key + same
+      # authorized_keys command="/opt/crm/stg/bin/deploy.sh" constraint
+      # as the deploy / migrate-up / wrapper-stale-preflight steps. The
+      # wrapper itself is the only thing the runner can invoke. No new
+      # SSH key, no widened command=, no inlined cosign install bytes
+      # (operator-bootstrap per staging.md §VPS-bootstrap — CI never
+      # installs cosign on the VPS, by design).
+      - name: preflight cosign present on VPS
+        timeout-minutes: 1
+        env:
+          STG_HOST: ${{ secrets.STG_HOST }}
+          STG_USER: ${{ secrets.STG_USER }}
+        run: |
+          set -uo pipefail
+          # Capture stdout+stderr together so the remediation block can
+          # echo whatever the wrapper said. We intentionally do NOT
+          # short-circuit on a non-zero exit before printing the output.
+          output="$(ssh -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              "${STG_USER}@${STG_HOST}" \
+              "preflight" 2>&1)"
+          rc=$?
+          if [ "${rc}" -eq 0 ]; then
+            # The wrapper prints `stg-deploy: preflight OK — cosign
+            # present` on success. We surface the line so the workflow
+            # log shows positive confirmation rather than empty silence.
+            printf '%s\n' "${output:-preflight OK}"
+            exit 0
+          fi
+          echo "::error::cosign is not on PATH on ${STG_HOST} — cd-stg cannot proceed (stg-deploy exit ${rc})."
+          {
+            echo "stale-component: cosign binary on ${STG_HOST}"
+            echo "expected:        \`command -v cosign\` returns 0 under the cd-stg SSH command=…"
+            echo "                 constraint (non-interactive PATH)"
+            echo "observed:        ${output:-<empty>} (wrapper exit ${rc})"
+            echo
+            echo "remediation (operator, see docs/deploy/staging.md §VPS-bootstrap, lines 437-474):"
+            echo "  # On the VPS as root, install cosign >= v2.4 from the Sigstore"
+            echo "  # release, self-verify against its own signature, then drop into"
+            echo "  # /usr/local/bin so the deploy user's PATH sees it:"
+            echo "  COSIGN_VERSION=2.4.1"
+            echo "  BASE=\"https://github.com/sigstore/cosign/releases/download/v\${COSIGN_VERSION}\""
+            echo "  curl -fsSL \"\${BASE}/cosign-linux-amd64\"     -o /tmp/cosign"
+            echo "  curl -fsSL \"\${BASE}/cosign-linux-amd64.sig\" -o /tmp/cosign.sig"
+            echo "  curl -fsSL \"\${BASE}/cosign-linux-amd64.pem\" -o /tmp/cosign.pem"
+            echo "  install -m 0755 /tmp/cosign /usr/local/bin/cosign"
+            echo "  cosign verify-blob \\"
+            echo "    --certificate /tmp/cosign.pem \\"
+            echo "    --signature   /tmp/cosign.sig \\"
+            echo "    --certificate-identity-regexp '^https://github\\.com/sigstore/cosign/' \\"
+            echo "    --certificate-oidc-issuer     'https://token.actions.githubusercontent.com' \\"
+            echo "    /tmp/cosign"
+            echo "  rm -f /tmp/cosign /tmp/cosign.sig /tmp/cosign.pem"
+            echo "  # Re-run this workflow once \`cosign version\` succeeds."
+          } >&2
+          exit 1
+
       - name: deploy via ssh
         env:
           STG_HOST: ${{ secrets.STG_HOST }}
@@ -237,6 +315,69 @@ jobs:
           done
           echo "smoke check FAILED — container running commit ${last_seen:-<unreachable>}, expected ${EXPECTED_SHA} (image stale or compose pull skipped)"
           echo "Manual rollback required — see docs/deploy/staging.md"
+          exit 1
+
+      # SIN-63348 — preflight: detect stale VPS wrapper before migrate-up.
+      #
+      # The migrate-up step below SSHes the `migrate-up <image-ref>` verb to
+      # /opt/crm/stg/bin/deploy.sh. That verb only exists in stg-deploy.sh
+      # versions shipped after SIN-63332. If a human operator has not
+      # re-installed the wrapper on the VPS since then (the in-repo
+      # deploy/scripts/stg-deploy.sh does NOT auto-sync — see
+      # docs/deploy/staging.md §4), the old wrapper rejects the verb with
+      # `stg-deploy: usage: deploy <image-ref>` exit 64. SIN-63347 caught
+      # this on the merge that should have run the SIN-63332 step end-to-end
+      # (cd-stg run 26334123677 / job 77524925091). The cryptic usage line
+      # made the failure look like a workflow bug instead of a VPS-side
+      # staleness.
+      #
+      # The preflight invokes the wrapper with empty argv (no
+      # SSH_ORIGINAL_COMMAND, no positional args). The wrapper hits its
+      # usage-check branch and prints its current usage line to stderr,
+      # then exits 64. We grep stdout+stderr for the canonical label
+      # `migrate-up` — present in the SIN-63332+ wrapper, absent in the
+      # legacy `deploy <image-ref>` wrapper. The wrapper's non-zero exit
+      # is EXPECTED and ignored; the grep verdict is the gate.
+      #
+      # Authentication / surface area: same SSH key and same
+      # `command="/opt/crm/stg/bin/deploy.sh"` authorized_keys lockdown as
+      # the deploy and migrate-up steps. No new SSH key, no unrestricted
+      # shell path. Option C from SIN-63347 (second SSH key) was explicitly
+      # rejected; Option B (wrapper self-update verb) is deferred as a
+      # future TODO.
+      - name: preflight wrapper supports migrate-up
+        timeout-minutes: 1
+        env:
+          STG_HOST: ${{ secrets.STG_HOST }}
+          STG_USER: ${{ secrets.STG_USER }}
+        run: |
+          set -uo pipefail
+          # The wrapper exits 64 on empty argv (usage branch). We capture
+          # stdout+stderr and inspect content, NOT the exit code.
+          output="$(ssh -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              "${STG_USER}@${STG_HOST}" </dev/null 2>&1 || true)"
+          if printf '%s\n' "${output}" | grep -q 'migrate-up'; then
+            echo "preflight OK — /opt/crm/stg/bin/deploy.sh supports migrate-up"
+            exit 0
+          fi
+          # Wrapper is stale. Emit an actionable error that names exactly
+          # what is wrong, what the expected wrapper looks like, what was
+          # observed, and the operator remediation — see staging.md §4.
+          echo "::error::VPS wrapper /opt/crm/stg/bin/deploy.sh is STALE — missing the migrate-up verb (SIN-63332)."
+          {
+            echo "stale-component: /opt/crm/stg/bin/deploy.sh on ${STG_HOST}"
+            echo "expected:        a usage line that mentions 'migrate-up' (SIN-63332+ wrapper)"
+            echo "observed:        ${output:-<empty>}"
+            echo
+            echo "remediation (operator, see docs/deploy/staging.md §4):"
+            echo "  # From a workstation with the crm repo cloned at \`main\`:"
+            echo "  scp deploy/scripts/stg-deploy.sh root@${STG_HOST}:/tmp/"
+            echo "  # Then on the VPS as root:"
+            echo "  sudo install -o root -g crm-deploy -m 0750 \\"
+            echo "    /tmp/stg-deploy.sh /opt/crm/stg/bin/deploy.sh"
+            echo "  # Re-run this workflow once the wrapper is in place."
+          } >&2
           exit 1
 
       # SIN-63332 — migrate-up gate. PR #104 (Fase 5+6) shipped new tables
@@ -318,12 +459,12 @@ jobs:
               cat /tmp/login.body
               return 1
             fi
-            if ! grep -qi "^Set-Cookie: __Host-sess-tenant" /tmp/login.headers; then
+            if ! grep -q "Set-Cookie: __Host-sess-tenant" /tmp/login.headers; then
               echo "::error::missing __Host-sess-tenant cookie"
               cat /tmp/login.headers
               return 1
             fi
-            if ! grep -qi "^Set-Cookie: __Host-csrf" /tmp/login.headers; then
+            if ! grep -q "Set-Cookie: __Host-csrf" /tmp/login.headers; then
               echo "::error::missing __Host-csrf cookie"
               cat /tmp/login.headers
               return 1

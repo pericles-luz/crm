@@ -34,6 +34,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/pericles-luz/crm/internal/billing"
+	"github.com/pericles-luz/crm/internal/tenancy"
+	"github.com/pericles-luz/crm/internal/web/shell"
 )
 
 // TenantRow is the projection rendered on the list page and the
@@ -105,6 +107,22 @@ type AssignPlanInput struct {
 // AssignPlanResult mirrors CreateTenantResult.
 type AssignPlanResult struct {
 	Tenant TenantRow
+}
+
+// TenantDetail is the SIN-63956 view-model for GET /master/tenants/{id}.
+// Renders the operator's "Impersonar tenant" CTA + the reason modal,
+// plus links into the existing grants / billing / ledger sub-pages.
+type TenantDetail struct {
+	Tenant TenantRow
+}
+
+// TenantDetailReader returns the master view of a single tenant. The
+// adapter is expected to project the same row shape ListResult.Tenants
+// carries; the detail handler does not need richer joins than the list
+// because the impersonate-trigger UI only references display name +
+// host + plan.
+type TenantDetailReader interface {
+	GetDetail(ctx context.Context, id uuid.UUID) (TenantDetail, error)
 }
 
 // TenantLister is the read-side port. The adapter joins tenant +
@@ -189,6 +207,13 @@ type Deps struct {
 	// the wallet adapter.
 	Grants GrantPort
 
+	// GrantRequests is the SIN-63605 4-eyes approval surface for
+	// over-cap grants (create / list / approve / reject). Optional:
+	// when nil the five request routes return 503 so the rest of the
+	// master console keeps working in deploys that haven't yet wired
+	// the master_grant_request adapter.
+	GrantRequests GrantRequestPort
+
 	// Billing is the SIN-62885 C11 billing-history view (subscription +
 	// invoices + grants). Optional: when nil, GET /master/tenants/{id}/
 	// billing returns 503 so deploys without the billing adapter wired
@@ -215,6 +240,28 @@ type Deps struct {
 	// Zero defaults to 200 so 10k entries paginate in ≤ 50 round
 	// trips without each individual page risking a huge index scan.
 	LedgerMaxPageSize int
+
+	// TenantsResolver is the SIN-63956 banner dependency. The master
+	// handlers call BuildImpersonationContext per request to translate
+	// the middleware-attached impersonation envelope into a banner
+	// view-model. When nil the banner falls back to the tenant UUID
+	// short-hex so the security signal stays visible. Wire the same
+	// tenancy.ByIDResolver used by the impersonation middleware.
+	TenantsResolver tenancy.ByIDResolver
+
+	// Clock returns the server's notion of "now" — used to stamp the
+	// `data-server-now` attribute on the impersonation banner so the
+	// client can compute a one-shot clock-skew offset (spec §2.6).
+	// Defaults to time.Now().UTC() when nil.
+	Clock func() time.Time
+
+	// TenantDetail is the SIN-63956 read port for the tenant detail
+	// page (GET /master/tenants/{id}). Optional: when nil the route
+	// degrades to the same row the list page already shows so deploys
+	// without a dedicated detail adapter still expose the impersonate
+	// CTA. Wire with the same adapter that backs Tenants when no
+	// richer projection exists yet.
+	TenantDetail TenantDetailReader
 }
 
 // GrantPort is the union of the three grants sub-ports used by the
@@ -236,6 +283,7 @@ type Handler struct {
 	maxPageSize           int
 	ledgerDefaultPageSize int
 	ledgerMaxPageSize     int
+	clock                 func() time.Time
 }
 
 // New constructs a Handler. Nil required dependencies are rejected at
@@ -281,13 +329,30 @@ func New(deps Deps) (*Handler, error) {
 	if ledgerDefaultPageSize > ledgerMaxPageSize {
 		return nil, errors.New("web/master: LedgerDefaultPageSize exceeds LedgerMaxPageSize")
 	}
+	clock := deps.Clock
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
 	return &Handler{
 		deps:                  deps,
 		defaultPageSize:       defaultPageSize,
 		maxPageSize:           maxPageSize,
 		ledgerDefaultPageSize: ledgerDefaultPageSize,
 		ledgerMaxPageSize:     ledgerMaxPageSize,
+		clock:                 clock,
 	}, nil
+}
+
+// activeImpersonationFor returns the banner view-model for the request
+// scope, or nil when no envelope is bound. The handler calls it before
+// rendering every page so the banner is consistent across all master
+// routes (spec §2.3 + §10.2 #9). The token is the CSRF token the SAIR
+// form needs to POST /master/impersonation/end.
+func (h *Handler) activeImpersonationFor(r *http.Request, token string) *shell.ImpersonationContext {
+	if h == nil {
+		return nil
+	}
+	return BuildImpersonationContext(r, h.deps.TenantsResolver, token, h.clock)
 }
 
 // Routes mounts the tenants + grants endpoints on a stdlib mux.
@@ -298,12 +363,21 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /master/tenants", h.ListTenants)
 	mux.HandleFunc("POST /master/tenants", h.CreateTenant)
 	mux.HandleFunc("PATCH /master/tenants/{id}/plan", h.AssignPlan)
+	mux.HandleFunc("GET /master/tenants/{id}", h.ShowTenantDetail)
 	// SIN-62884 C10 — grants surface. Conditionally mount; with
 	// Grants nil the routes return 503 so the rest of the console
 	// keeps working in early deploys.
 	mux.HandleFunc("GET /master/tenants/{id}/grants/new", h.ShowGrantsForm)
 	mux.HandleFunc("POST /master/tenants/{id}/grants", h.IssueGrant)
 	mux.HandleFunc("POST /master/grants/{id}/revoke", h.RevokeGrant)
+	// SIN-63605 — 4-eyes approval surface for over-cap grants.
+	// Returns 503 when GrantRequests is nil. Routes are registered
+	// regardless so the URL surface is uniform across deploys.
+	mux.HandleFunc("POST /master/tenants/{id}/grants/requests", h.CreateGrantRequest)
+	mux.HandleFunc("GET /master/grants/requests", h.ListGrantRequests)
+	mux.HandleFunc("GET /master/grants/requests/{id}", h.ShowGrantRequest)
+	mux.HandleFunc("POST /master/grants/requests/{id}/approve", h.ApproveGrantRequest)
+	mux.HandleFunc("POST /master/grants/requests/{id}/reject", h.RejectGrantRequest)
 	// SIN-62885 C11 — read-only billing + ledger views. With Billing
 	// or Ledger nil the respective routes 503 so the console keeps
 	// working in deploys that have not wired the read adapters.
