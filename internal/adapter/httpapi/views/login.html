@@ -1,13 +1,40 @@
-{{define "title"}}Login — CRM{{end}}
+{{define "title"}}{{with loginTenantName .}}{{.}} — Entrar{{else}}Entrar — CRM{{end}}{{end}}
 {{define "content"}}
-<main>
-  <h1>Login</h1>
-  {{if .Error}}<p role="alert" data-testid="login-error">{{.Error}}</p>{{end}}
-  <form method="POST" action="/login">
-    <input type="hidden" name="next" value="{{.Next}}" />
-    <label>Email <input type="email" name="email" autocomplete="username" required /></label>
-    <label>Senha <input type="password" name="password" autocomplete="current-password" required /></label>
-    <button type="submit">Entrar</button>
-  </form>
+<main class="login-page">
+  <section class="login-card" role="region" aria-labelledby="login-heading">
+    <header class="login-card__header">
+      {{- with loginTenantLogo .}}
+      <img class="login-card__logo" src="{{.}}" alt="" data-testid="login-tenant-logo" />
+      {{- else}}
+      <span class="login-card__wordmark" aria-hidden="true" data-testid="login-wordmark">CRM</span>
+      {{- end}}
+      <h1 id="login-heading" class="login-card__title" data-testid="login-tenant-name">
+        {{- with loginTenantName .}}{{.}}{{else}}Entrar{{end -}}
+      </h1>
+      {{- with loginTenantName .}}<p class="login-card__subtitle">Acesso ao CRM</p>{{end}}
+    </header>
+    {{if .Error}}<p role="alert" class="alert alert--danger login-card__error" data-testid="login-error">{{.Error}}</p>{{end}}
+    <form method="POST" action="/login">
+      <input type="hidden" name="next" value="{{.Next}}" />
+      <div class="login-card__field">
+        <label for="login-email">Email</label>
+        <input id="login-email" type="email" name="email" autocomplete="username" autofocus required />
+      </div>
+      <div class="login-card__field">
+        <label for="login-password">Senha</label>
+        <input id="login-password" type="password" name="password" autocomplete="current-password" required aria-describedby="login-password-help" minlength="12" />
+        <p id="login-password-help" class="login-card__help">Mínimo 12 caracteres.</p>
+      </div>
+      <button type="submit" class="btn btn--primary login-card__submit">Entrar</button>
+    </form>
+    <p class="login-card__aside">
+      <span class="login-card__forgot" role="link" aria-disabled="true" tabindex="-1" title="Em breve. Contate o gerente do tenant." data-testid="login-forgot-disabled">Esqueci minha senha</span>
+    </p>
+  </section>
+  {{- if not (loginWhiteLabel .)}}
+  <footer class="login-page__footer" data-testid="login-platform-footer">
+    <small>Powered by CRM Sindireceita</small>
+  </footer>
+  {{- end}}
 </main>
 {{end}}

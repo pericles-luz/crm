@@ -17,6 +17,7 @@ import (
 	"reflect"
 
 	csrfhelpers "github.com/pericles-luz/crm/internal/adapter/httpapi/csrf"
+	"github.com/pericles-luz/crm/internal/web/shell"
 )
 
 // tenantThemeStyle is the FuncMap helper that reads .TenantThemeStyle
@@ -64,10 +65,18 @@ func tenantThemeStyle(data any) template.CSS {
 // hello.html (SIN-63774). Available controls the rendered shape:
 // true → <a href="{{.Path}}">{{.Label}}</a>, false → an aria-disabled
 // <span> so the gap is visible to the operator instead of dead-linking.
+//
+// SIN-63940 / UX-F3 — Description carries the JTBD copy rendered on
+// the dashboard-cards block ("Atender clientes vindos de WhatsApp…").
+// Empty Description means "no card body line" — the card heading
+// stands alone and the surfaces nav <li> still works. Role-filtering
+// happens upstream in the handler so the template stays agnostic to
+// iam: the slice the template receives is the post-role-filter view.
 type Surface struct {
-	Label     string
-	Path      string
-	Available bool
+	Label       string
+	Path        string
+	Available   bool
+	Description string
 }
 
 // helloSurfaces is the FuncMap helper that reads .Surfaces from page
@@ -82,6 +91,29 @@ type Surface struct {
 //
 // Pure: no request state, no globals, safe across goroutines.
 func helloSurfaces(data any) []Surface {
+	return surfaceSlice(data, "Surfaces")
+}
+
+// helloCards is the FuncMap helper that reads .Cards from page data via
+// reflection. SIN-63940 / UX-F3 introduced a separate dashboard-cards
+// block above the surfaces nav: the cards are the role-filtered subset
+// with JTBD copy ("Atender clientes vindos de WhatsApp…"), while the
+// surfaces nav keeps the full navigable index. Reflecting on a separate
+// field lets the legacy views_test.go fixtures (no Cards field) keep
+// rendering against the same template without forcing a data-shape
+// migration.
+//
+// Returns:
+//   - the slice when the field exists and is a []Surface,
+//   - nil otherwise — the {{with}} guard in hello.html then skips the
+//     dashboard-cards section entirely.
+//
+// Pure: no request state, no globals, safe across goroutines.
+func helloCards(data any) []Surface {
+	return surfaceSlice(data, "Cards")
+}
+
+func surfaceSlice(data any, field string) []Surface {
 	if data == nil {
 		return nil
 	}
@@ -95,7 +127,7 @@ func helloSurfaces(data any) []Surface {
 	if v.Kind() != reflect.Struct {
 		return nil
 	}
-	f := v.FieldByName("Surfaces")
+	f := v.FieldByName(field)
 	if !f.IsValid() {
 		return nil
 	}
@@ -145,6 +177,98 @@ func cspNonce(data any) string {
 	return ""
 }
 
+// loginTenantName is the FuncMap helper that reads .TenantName from
+// the page data via reflection. SIN-63941 / UX-F4 added the tenant
+// identity to the /login surface so a B2B operator hitting acme.crm
+// sees the tenant brand before authenticating. Reflection keeps the
+// helper compatible with the legacy LoginViewModel shapes used by the
+// existing views_test.go fixtures.
+//
+// Returns:
+//   - the field value when it exists and is a string,
+//   - empty string otherwise — the template treats an empty name as
+//     "no tenant identity to show" and falls back to a generic title.
+//
+// Pure: no request state, no globals, safe across goroutines.
+func loginTenantName(data any) string {
+	return stringFieldOnPageData(data, "TenantName")
+}
+
+// loginTenantLogo is the FuncMap helper that reads .TenantLogo from
+// the page data via reflection. The login template treats a non-empty
+// value as an absolute URL into the cookieless static origin (see
+// internal/media/serve/url.go) and renders the <img>; an empty value
+// renders the "CRM" word-mark fallback.
+//
+// Pure: no request state, no globals, safe across goroutines.
+func loginTenantLogo(data any) string {
+	return stringFieldOnPageData(data, "TenantLogo")
+}
+
+// loginWhiteLabel is the FuncMap helper that reads .WhiteLabel from
+// the page data via reflection. The login template suppresses the
+// "Powered by CRM Sindireceita" footer when true so a white-label
+// tenant does not advertise the underlying platform on its pre-auth
+// surface.
+//
+// Returns:
+//   - the field value when it exists and is a bool,
+//   - false otherwise (fail-open to the platform marker so default
+//     tenants always show attribution).
+//
+// Pure: no request state, no globals, safe across goroutines.
+func loginWhiteLabel(data any) bool {
+	if data == nil {
+		return false
+	}
+	v := reflect.ValueOf(data)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	f := v.FieldByName("WhiteLabel")
+	if !f.IsValid() {
+		return false
+	}
+	if b, ok := f.Interface().(bool); ok {
+		return b
+	}
+	return false
+}
+
+// stringFieldOnPageData centralises the page-data string field lookup
+// pattern shared by the new login helpers. The cspNonce helper above
+// pre-dates this refactor and stays inline so existing tests/fixtures
+// that depend on its exact lookup contract do not shift.
+func stringFieldOnPageData(data any, field string) string {
+	if data == nil {
+		return ""
+	}
+	v := reflect.ValueOf(data)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	f := v.FieldByName(field)
+	if !f.IsValid() {
+		return ""
+	}
+	if s, ok := f.Interface().(string); ok {
+		return s
+	}
+	return ""
+}
+
 //go:embed *.html
 var assets embed.FS
 
@@ -161,6 +285,10 @@ var csrfFuncs = template.FuncMap{
 	"tenantThemeStyle": tenantThemeStyle,
 	"cspNonce":         cspNonce,
 	"helloSurfaces":    helloSurfaces,
+	"helloCards":       helloCards,
+	"loginTenantName":  loginTenantName,
+	"loginTenantLogo":  loginTenantLogo,
+	"loginWhiteLabel":  loginWhiteLabel,
 }
 
 // Login renders GET /login and the re-rendered POST /login form on
@@ -169,12 +297,19 @@ var Login = template.Must(
 	template.New("login").Funcs(csrfFuncs).ParseFS(assets, "layout.html", "login.html"),
 )
 
-// Hello renders GET /hello-tenant. Data shape: struct { TenantName,
-// UserID, CSRFToken string }. CSRFToken is the per-session CSPRNG
-// token from iam.Session.CSRFToken; it feeds the layout meta tag and
-// the logout form hidden input. Empty-string is allowed (legacy
-// session pre-dating migration 0011) — the helpers still render
-// safely, and the CSRF middleware will reject the next write attempt.
-var Hello = template.Must(
-	template.New("hello").Funcs(csrfFuncs).ParseFS(assets, "layout.html", "hello.html"),
-)
+// Hello renders GET /hello-tenant. SIN-63935 / UX-F1 migrated this
+// page to the shell.Layout app-shell so the post-login chrome (top-bar,
+// branded nav, user-menu) is shared with every other authenticated
+// surface. The page content (welcome string, surfaces nav, logout
+// form) still lives in hello.html via the layout's "content" block;
+// hello.html also re-emits the SIN-63294 /static/css/auth.css link
+// through the new shell {{block "head_extra" .}} slot so the bare
+// form/button baseline survives the migration.
+//
+// Data shape: struct { TenantName, UserID, CSRFToken,
+// TenantThemeStyle, CSPNonce, Surfaces …, plus optional shell.Data
+// fields (NavItems, UserMenuItems, UserDisplayName, TenantLogo) }.
+// Legacy callers without the shell fields still render: every
+// reflection helper in internal/web/shell falls back safely when the
+// field is absent.
+var Hello = shell.MustParse(csrfFuncs, assets, "hello.html")

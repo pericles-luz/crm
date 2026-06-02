@@ -116,6 +116,16 @@ var iamRoutes = []string{
 	"/inbox",
 	"/inbox/",
 	"/m/",
+	// SIN-63957 — master tenants + grants surface (Fase 2.5 C9/C10 +
+	// SIN-63605 + SIN-63958 impersonation). The "/master/" subtree
+	// pattern catches every /master/tenants/* and /master/grants/*
+	// path mounted by httpapi.NewRouter via Deps.MasterTenants +
+	// Deps.Impersonation. Without this entry the custom-domain
+	// catch-all at "/" shadows the entire master subtree and every
+	// /master/* request returns 404 even with deps slots populated —
+	// the same wireup gap memory reference_crm_router_nil_dep_silent_
+	// skip warns about, applied at the public-mux dispatch layer.
+	"/master/",
 	"/metrics",
 }
 
@@ -237,6 +247,33 @@ type iamHandlerOpts struct {
 	// as it did pre-SIN-63105 — /metrics returns 404 and the counters
 	// stay silent.
 	Metrics *obs.Metrics
+
+	// CustomDomainEnabled mirrors the SIN-62259 boot-time decision in
+	// buildCustomDomainHandler. The actual `/tenant/custom-domains*`
+	// route subtree lives on the public mux (mounted in main.go via
+	// mux.Handle("/", cdHandler)), but the SIN-63940 /hello-tenant
+	// landing surfaces the link too; this flag is the only signal the
+	// IAM router needs to flip the card from disabled to live. main.go
+	// derives the value from `getenv("CUSTOM_DOMAIN_UI_ENABLED") == "1"`
+	// because buildIAMHandler runs BEFORE buildCustomDomainHandler in
+	// the boot sequence and cannot inspect the resulting handler.
+	CustomDomainEnabled bool
+
+	// Impersonation carries the SIN-63958 session-bound impersonation
+	// bundle built by buildImpersonationStack. The caller-supplied opts
+	// value wins when Start is non-nil so cmd/server unit tests can
+	// inject stubs. When all slots are nil (default) the router skips
+	// the impersonation routes cleanly.
+	Impersonation httpapi.ImpersonationRoutes
+
+	// MasterTenants carries the SIN-63957 master tenants + grants +
+	// grant-requests bundle built by buildMasterTenantsStack. The
+	// caller-supplied opts value wins when List is non-nil so
+	// cmd/server unit tests can inject stubs (matches the WebLGPD /
+	// UserMFA / Impersonation pattern). When all slots are nil the
+	// router skips every /master/tenants/* and /master/grants* route
+	// cleanly per reference_crm_router_nil_dep_silent_skip.
+	MasterTenants httpapi.MasterTenantsRoutes
 }
 
 // buildIAMHandler assembles the IAM deps and returns the chi handler plus a
@@ -376,6 +413,32 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		userMFACleanup = stack.Cleanup
 	}
 
+	// SIN-63958 — session-bound impersonation envelope. Built here so it
+	// reuses the IAM pool + tenant resolver. opts.Impersonation, when Start
+	// is non-nil, wins over the wire-built stack (same pattern as
+	// opts.WebLGPD) so unit tests can inject stubs.
+	impersonationRoutes := opts.Impersonation
+	impersonationCleanup := func() {}
+	if impersonationRoutes.Start == nil {
+		stack := buildImpersonationStack(ctx, pool, tenants, getenv)
+		impersonationRoutes = stack.Routes
+		impersonationCleanup = stack.Cleanup
+	}
+
+	// SIN-63957 — master /master/tenants + /master/grants surface.
+	// Built here so it reuses the IAM runtime pool + the same
+	// SplitAuditLogger backing logoutAudit (master.grant.issued events
+	// land on the same audit chain). opts.MasterTenants wins when List
+	// is non-nil so cmd/server unit tests can inject stubs without
+	// standing up the master_ops DB.
+	masterTenantsRoutes := opts.MasterTenants
+	masterTenantsCleanup := func() {}
+	if masterTenantsRoutes.List == nil {
+		stack := buildMasterTenantsStack(ctx, pool, logoutAudit, getenv, logger, tenants)
+		masterTenantsRoutes = stack.Routes
+		masterTenantsCleanup = stack.Cleanup
+	}
+
 	h := httpapi.NewRouter(httpapi.Deps{
 		IAM: iamAdapter{
 			tenants:  tenants,
@@ -401,25 +464,30 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		// SessionToucher is nil — Activity middleware deferred to batch
 		// that lands the session role/last_activity DB columns (0077).
 		// Master MFA deps deferred to batch 17 (SIN-62526).
-		WebContacts:       opts.WebContacts,
-		WebFunnel:         opts.WebFunnel,
-		WebPrivacy:        opts.WebPrivacy,
-		WebAIPolicy:       opts.WebAIPolicy,
-		WebCatalog:        opts.WebCatalog,
-		WebCampaigns:      opts.WebCampaigns,
-		WebFunnelRules:    opts.WebFunnelRules,
-		WebCampaignPublic: webCampaignPublic,
-		WebBranding:       opts.WebBranding,
-		WebLGPD:           lgpdRoutes,
-		WebPublicPrivacy:  opts.WebPublicPrivacy,
-		WebConsent:        opts.WebConsent,
-		WebInbox:          opts.WebInbox,
-		Theme:             opts.Theme,
-		Metrics:           opts.Metrics,
-		UserMFA:           userMFARoutes,
+		WebContacts:         opts.WebContacts,
+		WebFunnel:           opts.WebFunnel,
+		WebPrivacy:          opts.WebPrivacy,
+		WebAIPolicy:         opts.WebAIPolicy,
+		WebCatalog:          opts.WebCatalog,
+		WebCampaigns:        opts.WebCampaigns,
+		WebFunnelRules:      opts.WebFunnelRules,
+		WebCampaignPublic:   webCampaignPublic,
+		WebBranding:         opts.WebBranding,
+		WebLGPD:             lgpdRoutes,
+		WebPublicPrivacy:    opts.WebPublicPrivacy,
+		WebConsent:          opts.WebConsent,
+		WebInbox:            opts.WebInbox,
+		Theme:               opts.Theme,
+		Metrics:             opts.Metrics,
+		UserMFA:             userMFARoutes,
+		CustomDomainEnabled: opts.CustomDomainEnabled,
+		Impersonation:       impersonationRoutes,
+		MasterTenants:       masterTenantsRoutes,
 	})
 
 	fullCleanup := func() {
+		masterTenantsCleanup()
+		impersonationCleanup()
 		userMFACleanup()
 		lgpdCleanup()
 		pool.Close()

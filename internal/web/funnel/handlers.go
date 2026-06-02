@@ -12,11 +12,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/pericles-luz/crm/internal/adapter/httpapi/csrf"
 	"github.com/pericles-luz/crm/internal/branding"
 	"github.com/pericles-luz/crm/internal/funnel"
 	"github.com/pericles-luz/crm/internal/http/middleware/csp"
+	"github.com/pericles-luz/crm/internal/iam"
 	"github.com/pericles-luz/crm/internal/tenancy"
+	"github.com/pericles-luz/crm/internal/web/shell"
 )
 
 // Mover is the write-side dependency: it is satisfied by
@@ -72,6 +73,18 @@ type CSRFTokenFn func(*http.Request) string
 // because MoveConversation requires a non-nil actor.
 type UserIDFn func(*http.Request) uuid.UUID
 
+// RoleFn returns the viewer's IAM role from the session context.
+type RoleFn func(*http.Request) iam.Role
+
+// TeamIDFn returns the viewer's team id from the session context.
+// Returns uuid.Nil until the teams migration lands (reserved for lider scoping).
+type TeamIDFn func(*http.Request) uuid.UUID
+
+// StatsGetter is the stats use-case port exposed to the handler.
+type StatsGetter interface {
+	GetStats(ctx context.Context, tenantID uuid.UUID, q funnel.StatsQuery) (funnel.Stats, error)
+}
+
 // Deps bundles the collaborators required by the handler.
 type Deps struct {
 	Mover             Mover
@@ -79,8 +92,11 @@ type Deps struct {
 	StageResolver     StageResolver
 	FunnelHistory     FunnelHistoryLister
 	AssignmentHistory AssignmentHistoryLister
+	Stats             StatsGetter // optional; omit to disable GET /funnel/stats + page header stats
 	CSRFToken         CSRFTokenFn
 	UserID            UserIDFn
+	Role              RoleFn   // required when Stats is non-nil
+	TeamID            TeamIDFn // optional; returns uuid.Nil when unset
 	Logger            *slog.Logger
 }
 
@@ -127,9 +143,15 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /funnel/transitions", h.transition)
 	mux.HandleFunc("GET /funnel/conversations/{id}/history", h.history)
 	mux.HandleFunc("GET /funnel/modal/close", h.modalClose)
+	if h.deps.Stats != nil {
+		mux.HandleFunc("GET /funnel/stats", h.stats)
+		mux.HandleFunc("GET /funnel/stats/drawer/close", h.drawerClose)
+	}
 }
 
-// board renders the full board shell.
+// board renders the full board shell. SIN-63943 — composes via
+// shell.Layout; embeds the stats header (KPIs + filters) when the
+// viewer's role permits, and surfaces per-stage column stats.
 func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
 	tenant, err := tenancy.FromContext(r.Context())
 	if err != nil {
@@ -146,24 +168,71 @@ func (h *Handler) board(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, http.StatusInternalServerError, "csrf token missing", errors.New("empty csrf token"))
 		return
 	}
+
+	role := h.viewerRole(r)
+	filters := parseFilters(r)
+
+	stats, statsErr := h.computeStats(r, tenant.ID, role, filters)
+	if statsErr != nil {
+		h.fail(w, http.StatusInternalServerError, "stats", statsErr)
+		return
+	}
+	canSeeStats := stats != nil
+	canSeeTeams := canSeeStats && role == iam.RoleTenantGerente
+
+	view := h.buildBoardView(board, stats)
+	view.TenantName = tenant.Name
+	view.UserDisplayName = displayNameForUser(h.deps.UserID(r))
+	view.CSRFToken = token
+	view.TenantThemeStyle = branding.ThemeStyleFromContext(r.Context())
+	view.CSPNonce = csp.Nonce(r.Context())
+	view.NavItems = buildFunnelNavItems()
+	view.UserMenuItems = buildFunnelUserMenu()
+	view.Stats = stats
+	view.CanSeeStats = canSeeStats
+	view.CanSeeTeams = canSeeTeams
+	view.Filters = filters
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := boardLayoutTmpl.Execute(w, struct {
-		Board            boardView
-		CSRFMeta         template.HTML
-		HXHeaders        template.HTMLAttr
-		CSRFToken        string
-		TenantThemeStyle template.CSS
-		CSPNonce         string
-	}{
-		Board:            toBoardView(board),
-		CSRFMeta:         csrf.MetaTag(token),
-		HXHeaders:        csrf.HXHeadersAttr(token),
-		CSRFToken:        token,
-		TenantThemeStyle: branding.ThemeStyleFromContext(r.Context()),
-		CSPNonce:         csp.Nonce(r.Context()),
-	}); err != nil {
+	if err := boardPageTmpl.ExecuteTemplate(w, "layout", view); err != nil {
 		h.deps.Logger.Error("web/funnel: render board", "err", err)
 	}
+}
+
+// computeStats calls the StatsGetter when the dependency is wired and
+// the viewer's role permits stats access. Atendente (and unknown roles)
+// short-circuit to nil so the page never renders the analytical header
+// for users who are not allowed to see it.
+func (h *Handler) computeStats(r *http.Request, tenantID uuid.UUID, role iam.Role, filters filtersView) (*funnel.Stats, error) {
+	if h.deps.Stats == nil {
+		return nil, nil
+	}
+	if role != iam.RoleTenantGerente && role != iam.RoleTenantLider {
+		return nil, nil
+	}
+	q := buildStatsQueryFromFilters(filters, role, h.deps.UserID(r), h.viewerTeamID(r))
+	result, err := h.deps.Stats.GetStats(r.Context(), tenantID, q)
+	if err != nil {
+		if errors.Is(err, funnel.ErrForbidden) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (h *Handler) viewerRole(r *http.Request) iam.Role {
+	if h.deps.Role == nil {
+		return iam.RoleTenantCommon
+	}
+	return h.deps.Role(r)
+}
+
+func (h *Handler) viewerTeamID(r *http.Request) uuid.UUID {
+	if h.deps.TeamID == nil {
+		return uuid.Nil
+	}
+	return h.deps.TeamID(r)
 }
 
 // transition moves a conversation to a new stage and re-renders the
@@ -219,7 +288,7 @@ func (h *Handler) transition(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, http.StatusInternalServerError, "board re-read", err)
 		return
 	}
-	view := toBoardView(board)
+	view := h.buildBoardView(board, nil)
 	card, ok := findCardInView(view, conversationID)
 	if !ok {
 		// The conversation was moved but no longer surfaces on the board
@@ -268,6 +337,13 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 // modalClose serves an empty body so the modal mount returns to its
 // closed state.
 func (h *Handler) modalClose(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+}
+
+// drawerClose serves an empty body so the drawer mount returns to its
+// closed state (SIN-63943 AC #3 close affordance).
+func (h *Handler) drawerClose(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 }
@@ -354,14 +430,23 @@ func (h *Handler) fail(w http.ResponseWriter, status int, msg string, err error)
 	http.Error(w, http.StatusText(status), status)
 }
 
-// toBoardView converts the domain board into the template view-model
-// with per-card prev/next stage keys filled in.
-func toBoardView(b funnel.Board) boardView {
+// buildBoardView converts the domain board into the template view-model
+// with per-card prev/next stage keys filled in. When stats is non-nil,
+// each column's StageStats slot is populated from the matching
+// funnel.StageStats so the column header can render avg-time + conv-rate.
+func (h *Handler) buildBoardView(b funnel.Board, stats *funnel.Stats) boardView {
 	stageKeys := make([]string, 0, len(b.Columns))
 	for _, col := range b.Columns {
 		stageKeys = append(stageKeys, col.Stage.Key)
 	}
 	prevByKey, nextByKey := neighbours(stageKeys)
+
+	statsByKey := map[string]funnel.StageStats{}
+	if stats != nil {
+		for _, s := range stats.Stages {
+			statsByKey[s.StageKey] = s
+		}
+	}
 
 	view := boardView{Columns: make([]columnView, 0, len(b.Columns))}
 	for _, col := range b.Columns {
@@ -372,6 +457,13 @@ func toBoardView(b funnel.Board) boardView {
 				Label: col.Stage.Label,
 			},
 			Cards: make([]cardView, 0, len(col.Cards)),
+		}
+		if s, ok := statsByKey[col.Stage.Key]; ok {
+			cv.Stats = stageStatsView{
+				HasStats:       true,
+				AvgTimeInStage: s.AvgTimeInStage,
+				ConvRate:       s.ConvRate,
+			}
 		}
 		for _, c := range col.Cards {
 			cv.Cards = append(cv.Cards, cardView{
@@ -421,20 +513,44 @@ func findCardInView(view boardView, conversationID uuid.UUID) (cardView, bool) {
 	return cardView{}, false
 }
 
-// boardView is the template-shaped board.
+// boardView is the template-shaped board. Embeds the shell.Data field
+// surface so shell.Layout's reflection-based helpers (shellTenantName,
+// shellNavItems, …) find every chrome field by name.
 type boardView struct {
-	Columns []columnView
+	// shell.Data fields (read by shell.Layout reflection helpers)
+	TenantName       string
+	TenantLogo       string
+	UserDisplayName  string
+	NavItems         []shell.NavItem
+	UserMenuItems    []shell.UserMenuItem
+	CSRFToken        string
+	CSPNonce         string
+	TenantThemeStyle template.CSS
+
+	// Funnel content
+	Columns     []columnView
+	Stats       *funnel.Stats
+	CanSeeStats bool
+	CanSeeTeams bool
+	Filters     filtersView
 }
 
 type columnView struct {
 	Stage stageView
 	Cards []cardView
+	Stats stageStatsView
 }
 
 type stageView struct {
 	ID    string
 	Key   string
 	Label string
+}
+
+type stageStatsView struct {
+	HasStats       bool
+	AvgTimeInStage time.Duration
+	ConvRate       *float64
 }
 
 type cardView struct {
@@ -445,4 +561,194 @@ type cardView struct {
 	StageKey       string
 	PrevKey        string
 	NextKey        string
+}
+
+// filtersView is the view-model of the period/owner filter form.
+type filtersView struct {
+	Period string // "7d" | "30d" | "90d" — empty defaults to 30d in the UI
+	Owner  string // "" | "me"
+}
+
+// stats handles GET /funnel/stats. It enforces coarse RBAC at the door
+// (atendente → 403), constructs a StatsQuery from query-string params,
+// calls StatsService.GetStats, and renders the HTMX stats partial.
+//
+// SIN-63943 — accepts an optional `view` query param: `view=drawer`
+// renders the drawer-only partial (per-attendant + per-team + per-channel
+// tables); default behaviour renders the full statsTmpl (kept for
+// backwards compatibility with the SIN-63962 handler tests).
+func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
+	tenant, err := tenancy.FromContext(r.Context())
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "stats: tenant required", err)
+		return
+	}
+
+	var viewerRole iam.Role
+	if h.deps.Role != nil {
+		viewerRole = h.deps.Role(r)
+	}
+
+	// Coarse RBAC gate: atendente cannot access stats.
+	if viewerRole == iam.RoleTenantAtendente {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+
+	viewerID := h.deps.UserID(r)
+
+	var viewerTeamID uuid.UUID
+	if h.deps.TeamID != nil {
+		viewerTeamID = h.deps.TeamID(r)
+	}
+
+	q := buildStatsQuery(r, viewerRole, viewerID, viewerTeamID)
+
+	result, err := h.deps.Stats.GetStats(r.Context(), tenant.ID, q)
+	if err != nil {
+		if errors.Is(err, funnel.ErrForbidden) {
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		h.fail(w, http.StatusInternalServerError, "stats: get", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	switch r.URL.Query().Get("view") {
+	case "drawer":
+		data := struct {
+			Stats funnel.Stats
+		}{Stats: result}
+		if err := statsDrawerTmpl.Execute(w, data); err != nil {
+			h.deps.Logger.Error("web/funnel: stats drawer: render", "err", err)
+		}
+	default:
+		view := statsView{
+			Stats:    result,
+			Period:   q.Period.Kind,
+			CSPNonce: csp.Nonce(r.Context()),
+		}
+		if err := statsTmpl.Execute(w, view); err != nil {
+			h.deps.Logger.Error("web/funnel: stats: render", "err", err)
+		}
+	}
+}
+
+// parseFilters lifts the period + owner query params off the request and
+// normalizes them for the filter form view-model.
+func parseFilters(r *http.Request) filtersView {
+	period := strings.TrimSpace(r.URL.Query().Get("period"))
+	switch period {
+	case "7d", "30d", "90d":
+		// ok
+	default:
+		period = ""
+	}
+	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+	if owner != "me" {
+		owner = ""
+	}
+	return filtersView{Period: period, Owner: owner}
+}
+
+// buildStatsQueryFromFilters maps the view-model filters back into the
+// domain StatsQuery. The board handler uses this when computing
+// page-header stats; the /funnel/stats handler keeps using the existing
+// buildStatsQuery helper (which reads the request's query string
+// directly) for backwards compatibility.
+func buildStatsQueryFromFilters(f filtersView, role iam.Role, viewerID, viewerTeamID uuid.UUID) funnel.StatsQuery {
+	q := funnel.StatsQuery{
+		ViewerRole:   role,
+		ViewerID:     viewerID,
+		ViewerTeamID: viewerTeamID,
+	}
+	switch f.Period {
+	case "7d":
+		q.Period = funnel.Period{Kind: funnel.PeriodLast7d}
+	case "90d":
+		q.Period = funnel.Period{Kind: funnel.PeriodLast90d}
+	default:
+		q.Period = funnel.Period{Kind: funnel.PeriodLast30d}
+	}
+	if f.Owner == "me" {
+		q.OwnerScope = funnel.OwnerScope{Kind: funnel.OwnerScopeUser, UserID: viewerID}
+	}
+	return q
+}
+
+// buildStatsQuery parses GET /funnel/stats query string params.
+// Supported params: period (7d|30d|90d|custom), from/to (RFC3339 for custom).
+func buildStatsQuery(r *http.Request, role iam.Role, viewerID, viewerTeamID uuid.UUID) funnel.StatsQuery {
+	q := funnel.StatsQuery{
+		ViewerRole:   role,
+		ViewerID:     viewerID,
+		ViewerTeamID: viewerTeamID,
+	}
+
+	switch r.URL.Query().Get("period") {
+	case "7d":
+		q.Period = funnel.Period{Kind: funnel.PeriodLast7d}
+	case "90d":
+		q.Period = funnel.Period{Kind: funnel.PeriodLast90d}
+	case "custom":
+		from, errF := time.Parse(time.RFC3339, r.URL.Query().Get("from"))
+		to, errT := time.Parse(time.RFC3339, r.URL.Query().Get("to"))
+		if errF == nil && errT == nil && !from.IsZero() && !to.IsZero() {
+			q.Period = funnel.Period{Kind: funnel.PeriodCustom, From: from, To: to}
+		} else {
+			q.Period = funnel.Period{Kind: funnel.PeriodLast30d}
+		}
+	default: // "30d" or empty
+		q.Period = funnel.Period{Kind: funnel.PeriodLast30d}
+	}
+
+	// Owner filter mirrors the board page's filter form, with the
+	// service still authoritatively clamping for lider/atendente.
+	if r.URL.Query().Get("owner") == "me" {
+		q.OwnerScope = funnel.OwnerScope{Kind: funnel.OwnerScopeUser, UserID: viewerID}
+	}
+
+	return q
+}
+
+// statsView is the template view model for the stats partial.
+type statsView struct {
+	Stats    funnel.Stats
+	Period   funnel.PeriodKind
+	CSPNonce string
+}
+
+// buildFunnelNavItems returns the top-bar nav for the funnel page. The
+// brand link points back at /hello-tenant; the nav lists the primary
+// post-login destinations so AC #8 ("Migração para shell.Layout confirma
+// volta para landing via top-nav") is observable in any role.
+func buildFunnelNavItems() []shell.NavItem {
+	return []shell.NavItem{
+		{Label: "Inbox", Path: "/inbox"},
+		{Label: "Funil", Path: "/funnel", Active: true},
+	}
+}
+
+// buildFunnelUserMenu returns the user-menu dropdown entries common to
+// authenticated funnel sessions.
+func buildFunnelUserMenu() []shell.UserMenuItem {
+	return []shell.UserMenuItem{
+		{Label: "Sair", Path: "/logout", Form: true},
+	}
+}
+
+// displayNameForUser is the placeholder display formatter for the
+// user-menu button. The session does not (yet) carry a human label,
+// so we render the uuid prefix — replace once a user-name resolver
+// lands.
+func displayNameForUser(userID uuid.UUID) string {
+	if userID == uuid.Nil {
+		return "Conta"
+	}
+	s := userID.String()
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
