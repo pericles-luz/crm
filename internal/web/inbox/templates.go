@@ -311,28 +311,34 @@ var inboxListRegionTmpl = template.Must(template.New("inbox_list_region").Funcs(
 </div>
 `))
 
-// inboxFiltersTmpl is the filter bar (SIN-64968 §3). State is a group of
-// pill links (hx-get); channel is a <select> and "minhas" a checkbox,
-// both firing via hx-trigger="change" (an HTMX attribute — NOT an inline
-// onchange handler, which the strict CSP would render-but-never-execute).
-// Every control re-emits the full filter set so combinations accumulate
-// (AND) and the active state survives the swap. The whole region is the
-// target so the active pill re-renders.
+// inboxFiltersTmpl is the filter bar (SIN-64968 §3 + SIN-64979 §4). State
+// is a group of pill links (hx-get); channel and the assignment queue are
+// <select>s, all firing via hx-trigger="change" (an HTMX attribute — NOT
+// an inline onchange handler, which the strict CSP would
+// render-but-never-execute). The assignment queue is the SIN-64979 "visão
+// de fila": "Todas" (no filter), "Não atribuídas" (unassigned queue), and
+// "Atribuídas a mim" (the session user's conversations) — a single
+// mutually-exclusive <select> rather than two toggles, matching the
+// read-side use case which rejects the unassigned+user combination. Every
+// control re-emits the full filter set (hx-include="closest form" + the
+// pills' explicit hrefs) so combinations accumulate (AND) and the active
+// state survives the swap. The whole region is the target so the active
+// pill re-renders.
 var inboxFiltersTmpl = template.Must(template.New("inbox_filters").Funcs(templateFuncs).Parse(`<form class="inbox-filters" role="search" aria-label="Filtrar conversas"
       hx-get="/inbox" hx-target="#conversation-list-region" hx-swap="outerHTML" hx-push-url="true">
   <div class="inbox-filters__group" role="group" aria-label="Estado">
     <a class="inbox-filters__pill{{if eq .Filters.State "open"}} is-active{{end}}"
-       href="/inbox?state=open&channel={{.Filters.Channel}}&assigned={{if .Filters.AssignedMe}}me{{end}}"
+       href="/inbox?state=open&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}"
        {{if eq .Filters.State "open"}}aria-current="true"{{end}}
-       hx-get="/inbox?state=open&channel={{.Filters.Channel}}&assigned={{if .Filters.AssignedMe}}me{{end}}">Abertas</a>
+       hx-get="/inbox?state=open&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}">Abertas</a>
     <a class="inbox-filters__pill{{if eq .Filters.State "closed"}} is-active{{end}}"
-       href="/inbox?state=closed&channel={{.Filters.Channel}}&assigned={{if .Filters.AssignedMe}}me{{end}}"
+       href="/inbox?state=closed&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}"
        {{if eq .Filters.State "closed"}}aria-current="true"{{end}}
-       hx-get="/inbox?state=closed&channel={{.Filters.Channel}}&assigned={{if .Filters.AssignedMe}}me{{end}}">Fechadas</a>
+       hx-get="/inbox?state=closed&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}">Fechadas</a>
     <a class="inbox-filters__pill{{if eq .Filters.State ""}} is-active{{end}}"
-       href="/inbox?state=&channel={{.Filters.Channel}}&assigned={{if .Filters.AssignedMe}}me{{end}}"
+       href="/inbox?state=&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}"
        {{if eq .Filters.State ""}}aria-current="true"{{end}}
-       hx-get="/inbox?state=&channel={{.Filters.Channel}}&assigned={{if .Filters.AssignedMe}}me{{end}}">Todas</a>
+       hx-get="/inbox?state=&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}">Todas</a>
   </div>
   <label class="inbox-filters__field">
     <span class="visually-hidden">Canal</span>
@@ -344,9 +350,13 @@ var inboxFiltersTmpl = template.Must(template.New("inbox_filters").Funcs(templat
       <option value="webchat"{{if eq .Filters.Channel "webchat"}} selected{{end}}>Webchat</option>
     </select>
   </label>
-  <label class="inbox-filters__toggle">
-    <input type="checkbox" name="assigned" value="me" hx-trigger="change" hx-get="/inbox" hx-include="closest form" hx-target="#conversation-list-region" hx-swap="outerHTML" hx-push-url="true"{{if .Filters.AssignedMe}} checked{{end}}>
-    <span>Atribuídas a mim</span>
+  <label class="inbox-filters__field">
+    <span class="visually-hidden">Fila de atribuição</span>
+    <select name="assigned" class="inbox-filters__select" aria-label="Fila de atribuição" hx-trigger="change" hx-get="/inbox" hx-include="closest form" hx-target="#conversation-list-region" hx-swap="outerHTML" hx-push-url="true">
+      <option value=""{{if and (not .Filters.AssignedMe) (not .Filters.Unassigned)}} selected{{end}}>Todas as filas</option>
+      <option value="unassigned"{{if .Filters.Unassigned}} selected{{end}}>Não atribuídas</option>
+      <option value="me"{{if .Filters.AssignedMe}} selected{{end}}>Atribuídas a mim</option>
+    </select>
   </label>
   <input type="hidden" name="state" value="{{.Filters.State}}">
 </form>
@@ -519,18 +529,73 @@ var conversationContextTmpl = template.Must(template.New("conversation_context")
     <p class="conversation-context__funnel-empty">Sem etapa definida</p>
     {{- end}}
   </section>
-  <section class="conversation-context__section conversation-context__assignment" aria-label="Atribuição" data-testid="conversation-context-assignment">
-    <h3 class="conversation-context__subtitle">Atribuição</h3>
-    {{- if .Assigned}}
-    <p class="conversation-context__assignment-value conversation-context__assignment-value--assigned">Atribuída</p>
-    {{- else}}
-    <p class="conversation-context__assignment-value conversation-context__assignment-value--unassigned">Não atribuída</p>
-    {{- end}}
-  </section>
+  {{template "conversation_assignment" .}}
 {{- else}}
   <p class="conversation-context__empty" data-testid="conversation-context-empty">Contexto indisponível.</p>
 {{- end}}
 </aside>
+`))
+
+// conversationAssignmentTmpl renders the assignment section of the
+// conversation context panel (SIN-64979). It is also the standalone
+// HTMX swap target for POST /inbox/conversations/{id}/assign responses:
+// the form targets "#conversation-context-assignment" with
+// hx-swap="outerHTML", so the element returned here replaces the old
+// section in place without reloading the full context panel.
+//
+// When .Assignees is non-nil the section renders an interactive
+// dropdown + "Atribuir a mim" shortcut; when nil it degrades to the
+// same read-only "Atribuída / Não atribuída" text the context panel
+// showed before SIN-64979 so unwired deployments keep the same UX.
+//
+// CSP-safe: no inline on*= handlers — the forms use hx-* attributes
+// exclusively. The parent layout's hx-headers body attribute propagates
+// the X-CSRF-Token to all HTMX requests, so no hidden field is needed
+// inside the partial.
+var conversationAssignmentTmpl = template.Must(template.New("conversation_assignment").Funcs(templateFuncs).Parse(`<section id="conversation-context-assignment" class="conversation-context__section conversation-context__assignment" aria-label="Atribuição" data-testid="conversation-context-assignment">
+  <h3 class="conversation-context__subtitle">Atribuição</h3>
+{{- if .Assignees}}
+  <p class="conversation-context__assignment-current">
+    {{- if .AssignedDisplayName}}
+    <span class="assignee-chip" title="{{.AssignedDisplayName}}"><span aria-hidden="true">{{initials .AssignedDisplayName}}</span></span>
+    <span class="conversation-context__assignment-label">{{.AssignedDisplayName}}</span>
+    {{- else if .Assigned}}
+    <span class="assignee-chip assignee-chip--unknown"><span aria-hidden="true">?</span></span>
+    <span class="conversation-context__assignment-label">Atribuída</span>
+    {{- else}}
+    <span class="assignee-chip assignee-chip--unassigned" aria-hidden="true">—</span>
+    <span class="conversation-context__assignment-label conversation-context__assignment-label--unassigned">Não atribuída</span>
+    {{- end}}
+  </p>
+  <form class="conversation-context__assign-form"
+        hx-post="/inbox/conversations/{{.ConversationIDStr}}/assign"
+        hx-target="#conversation-context-assignment"
+        hx-swap="outerHTML">
+    <label for="assign-target-{{.ConversationIDStr}}" class="visually-hidden">Atribuir a</label>
+    <select id="assign-target-{{.ConversationIDStr}}" name="targetUserID" class="conversation-context__assign-select">
+      {{- range .Assignees}}
+      <option value="{{.UserID}}">{{.DisplayName}}</option>
+      {{- end}}
+    </select>
+    <button type="submit" class="conversation-context__assign-btn">Atribuir</button>
+  </form>
+  {{- if .CurrentUserID}}
+  <form class="conversation-context__assign-me-form"
+        hx-post="/inbox/conversations/{{.ConversationIDStr}}/assign"
+        hx-target="#conversation-context-assignment"
+        hx-swap="outerHTML">
+    <input type="hidden" name="targetUserID" value="{{.CurrentUserID}}">
+    <button type="submit" class="conversation-context__assign-me-btn">Atribuir a mim</button>
+  </form>
+  {{- end}}
+{{- else}}
+  {{- if .Assigned}}
+  <p class="conversation-context__assignment-value conversation-context__assignment-value--assigned">Atribuída</p>
+  {{- else}}
+  <p class="conversation-context__assignment-value conversation-context__assignment-value--unassigned">Não atribuída</p>
+  {{- end}}
+{{- end}}
+</section>
 `))
 
 // customerPanelTmpl is the right rail. It is rendered both inside the
@@ -683,7 +748,7 @@ func init() {
 	// {{template "conversation_list" …}} and so on with one template
 	// tree. Errors here are programmer errors (typos in the template
 	// source) — surface them at process start, not at request time.
-	for _, child := range []*template.Template{inboxListRegionTmpl, inboxFiltersTmpl, conversationListTmpl, conversationViewTmpl, messageBubbleTmpl, customerPanelTmpl, channelBadgeTmpl} {
+	for _, child := range []*template.Template{inboxListRegionTmpl, inboxFiltersTmpl, conversationListTmpl, conversationViewTmpl, messageBubbleTmpl, customerPanelTmpl, channelBadgeTmpl, conversationContextTmpl, conversationAssignmentTmpl} {
 		if _, err := inboxLayoutTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
 			panic("inbox/web: register " + child.Name() + ": " + err.Error())
 		}
@@ -696,12 +761,12 @@ func init() {
 			panic("inbox/web: register " + child.Name() + " in list region: " + err.Error())
 		}
 	}
-	for _, child := range []*template.Template{messageBubbleTmpl, customerPanelTmpl, channelBadgeTmpl, conversationContextTmpl} {
+	for _, child := range []*template.Template{messageBubbleTmpl, customerPanelTmpl, channelBadgeTmpl, conversationContextTmpl, conversationAssignmentTmpl} {
 		if _, err := conversationViewTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
 			panic("inbox/web: register " + child.Name() + " in view: " + err.Error())
 		}
 	}
-	for _, child := range []*template.Template{channelBadgeTmpl} {
+	for _, child := range []*template.Template{channelBadgeTmpl, conversationAssignmentTmpl} {
 		if _, err := conversationContextTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
 			panic("inbox/web: register " + child.Name() + " in context: " + err.Error())
 		}
@@ -728,6 +793,7 @@ func init() {
 		inboxListRegionTmpl,
 		conversationViewTmpl,
 		conversationContextTmpl,
+		conversationAssignmentTmpl,
 		customerPanelTmpl,
 		channelBadgeTmpl,
 		inboxLayoutTmpl,
