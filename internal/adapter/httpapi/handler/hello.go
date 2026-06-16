@@ -61,6 +61,14 @@ type HelloTenantExtendedDeps struct {
 	// live; false renders the standard "Indisponível neste ambiente"
 	// disabled state so the gap is visible to the gerente.
 	WalletEnabled bool
+	// DashboardEnabled mirrors deps.WebDashboard != nil in router.go
+	// (SIN-65008 — managerial dashboard / relatórios). True renders the
+	// "Painel / relatórios" surface link live; false renders the
+	// disabled "Indisponível neste ambiente" hint so the gap is visible
+	// to the operator (memory hello_tenant_sync_on_mount — a mounted
+	// subtree MUST update this index or the post-login landing silently
+	// loses the link).
+	DashboardEnabled bool
 }
 
 // NewHelloTenant returns the post-login landing handler with a typed
@@ -366,6 +374,20 @@ func helloIndexRows(deps HelloTenantDeps, role iam.Role) []helloSurfaceRow {
 				// matrix.
 				Roles: nil,
 				// TopNav: false — settings surface; body-only per AC §2
+			},
+			helloSurfaceRow{
+				Path:         "/dashboard",
+				SurfaceLabel: "Painel / relatórios",
+				CardLabel:    "Painel / relatórios",
+				Available:    deps.Extended.DashboardEnabled,
+				Description:  "Acompanhar indicadores de atendimento e funil (conversas, tempos de resposta, volume por canal) e exportar relatórios em CSV.",
+				// Gated in router.go on RequireAction(ActionTenantContactRead),
+				// satisfied by atendente AND gerente — keep the index in sync
+				// with that gate so the seed atendente (the only HTTP-loginable
+				// seed user) sees the link.
+				Roles: atendenteOrAbove,
+				// TopNav: false — reporting surface; body-only keeps the
+				// top-bar scannable, matching the privacy/2FA precedent.
 			},
 		)
 	}
