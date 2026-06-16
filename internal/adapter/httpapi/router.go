@@ -471,6 +471,25 @@ type Deps struct {
 	//   GET  /inbox/conversations/{id}/messages/{msgID}/status
 	WebInbox http.Handler
 
+	// WebDashboard is the SIN-65008 managerial dashboard HTMX UI handler
+	// from internal/web/dashboard (frontend half of SIN-64963; the
+	// SIN-65007 read-model backs it). When non-nil, the two routes are
+	// mounted in the authed group so they inherit TenantScope + Auth +
+	// CSRF, and each is gated by RequireAction(iam.ActionTenantContactRead)
+	// — satisfied by tenant_atendente AND tenant_gerente, so the only
+	// HTTP-loginable seed user (agent@acme = atendente) reaches it (a
+	// gerente-only gate would 403 the staging smoke; see SIN-63793/63858).
+	//
+	// Routes mounted:
+	//   GET /dashboard
+	//   GET /dashboard/export.csv
+	//
+	// Nil keeps both routes unmounted (chi emits 404) so router tests
+	// that don't exercise the surface keep their pre-PR behaviour; the
+	// wire layer in cmd/server/dashboard_wire.go returns nil when the
+	// metrics read-model is not wired (DATABASE_URL unset).
+	WebDashboard http.Handler
+
 	// WebWallet is the SIN-63942 / UX-F5 gerente wallet UI handler
 	// from internal/web/walletui. When non-nil, the four /wallet*
 	// routes are mounted in the authed group so they inherit
@@ -917,6 +936,10 @@ func NewRouter(deps Deps) http.Handler {
 					CustomDomainEnabled: deps.CustomDomainEnabled,
 					// SIN-63942 / UX-F5 — wallet UI presence flag.
 					WalletEnabled: deps.WebWallet != nil,
+					// SIN-65008 — managerial dashboard presence flag. Keeps
+					// the post-login index in sync with the /dashboard mount
+					// (memory hello_tenant_sync_on_mount).
+					DashboardEnabled: deps.WebDashboard != nil,
 				},
 			}))
 			if deps.Authorizer != nil {
@@ -1223,6 +1246,29 @@ func NewRouter(deps Deps) http.Handler {
 				// RequireCSRF gate. When the dep is nil the inner mux returns
 				// 404 for the POST, so listing it here is safe either way.
 				authed.Method(http.MethodPost, "/inbox/conversations/{id}/assign", webInbox)
+			}
+
+			// SIN-65008 — managerial dashboard / relatórios surface
+			// (frontend half of SIN-64963; SIN-65007 read-model). Same
+			// envelope as the other web/* handlers: RequireAuth installs
+			// the principal, RequireAction(ActionTenantContactRead) gates
+			// every method. That action is satisfied by atendente AND
+			// gerente, so the seed atendente reaches the page (a
+			// gerente-only gate would 403 the staging smoke). Both routes
+			// are reads; the authed group's RequireCSRF short-circuits
+			// safely on GET. When Authorizer is nil (router tests) the
+			// gate skips and the inner mux still runs with a Principal.
+			if deps.WebDashboard != nil {
+				webDashboard := http.Handler(deps.WebDashboard)
+				if deps.Authorizer != nil {
+					webDashboard = middleware.RequireAuth(middleware.RequireAuthDeps{})(
+						middleware.RequireAction(deps.Authorizer, iam.ActionTenantContactRead, nil)(webDashboard),
+					)
+				} else {
+					webDashboard = middleware.RequireAuth(middleware.RequireAuthDeps{})(webDashboard)
+				}
+				authed.Method(http.MethodGet, "/dashboard", webDashboard)
+				authed.Method(http.MethodGet, "/dashboard/export.csv", webDashboard)
 			}
 
 			// SIN-63942 / UX-F5 — gerente wallet UI. Four routes share

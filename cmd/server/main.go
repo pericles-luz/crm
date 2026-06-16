@@ -328,6 +328,14 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 	webWalletHandler, webWalletCleanup := buildWalletUIHandler(ctx, getenv)
 	defer webWalletCleanup()
 
+	// SIN-65008 — managerial dashboard / relatórios. The SIN-65007
+	// wire owns the metrics pgxpool (its cleanup releases it) and
+	// returns a nil use case when DATABASE_URL is unset; the dashboard
+	// handler wire then returns nil so /dashboard* stays unmounted.
+	metricsDashboardUC, metricsDashboardCleanup := buildMetricsDashboard(ctx, getenv)
+	defer metricsDashboardCleanup()
+	webDashboardHandler := buildDashboardHandler(metricsDashboardUC)
+
 	// SIN-62527 / SIN-62217 — IAM chi handler (login, logout, hello-tenant,
 	// /m/*, metrics). Mounted before the custom-domain catch-all so
 	// Go's ServeMux longer-prefix rule keeps IAM routes out of the
@@ -345,6 +353,7 @@ func runWith(ctx context.Context, addr string, getenv func(string) string, webho
 		WebConsent:         webConsentHandler,
 		WebBillingInvoices: webBillingInvoicesHandler,
 		WebInbox:           webInboxHandler,
+		WebDashboard:       webDashboardHandler,
 		WebWallet:          webWalletHandler,
 		Theme:              brandingStack.Theme,
 		Metrics:            metrics,

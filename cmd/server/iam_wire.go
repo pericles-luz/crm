@@ -244,6 +244,13 @@ type iamHandlerOpts struct {
 	// exercise the surface keep their pre-PR behaviour.
 	WebInbox http.Handler
 
+	// WebDashboard is the SIN-65008 managerial dashboard HTMX UI handler
+	// built by dashboard_wire.go on top of the SIN-65007 metrics read-
+	// model use case. Nil keeps the /dashboard + /dashboard/export.csv
+	// routes unmounted (chi emits 404); cmd/server tests that don't
+	// exercise the surface keep their pre-PR behaviour.
+	WebDashboard http.Handler
+
 	// WebWallet is the SIN-63942 / UX-F5 gerente wallet UI handler
 	// built by walletui_wire.go on top of the SIN-63954 read-side
 	// ports + postgres adapter. Nil keeps every /wallet* route
@@ -527,6 +534,7 @@ func buildIAMHandler(ctx context.Context, getenv func(string) string, opts iamHa
 		WebConsent:          opts.WebConsent,
 		WebBillingInvoices:  opts.WebBillingInvoices,
 		WebInbox:            opts.WebInbox,
+		WebDashboard:        opts.WebDashboard,
 		WebWallet:           opts.WebWallet,
 		Theme:               opts.Theme,
 		Metrics:             opts.Metrics,
