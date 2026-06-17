@@ -43,7 +43,7 @@ func freshDBWithCatalog(t *testing.T) (*testpg.DB, context.Context) {
 		// filter. Tests that pre-date this column round-trip an empty
 		// string by default (HydrateProductFull picks "" when
 		// SetCategory is never called).
-		"0118_product_category.up.sql",
+		"0120_product_category.up.sql",
 	)
 	return db, ctx
 }
