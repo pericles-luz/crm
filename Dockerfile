@@ -26,7 +26,7 @@
 # syntax=docker/dockerfile:1.7
 
 # --- builder stage ---------------------------------------------------------
-FROM golang:1.26.4-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
+FROM golang:1.26.4-alpine@sha256:7a3e50096189ad57c9f9f865e7e4aa8585ed1585248513dc5cda498e2f41812c AS builder
 
 WORKDIR /src
 
@@ -62,9 +62,9 @@ ARG COMMIT_SHA=unknown
 
 # CGO_ENABLED=0 + -trimpath + -ldflags="-s -w" yields a small, reproducible,
 # statically linked binary. GOFLAGS prevents the toolchain from auto-downloading
-# a different Go version at build time (we want the pinned 1.26.4 alpine image,
-# matching go.mod's `toolchain go1.26.4` directive — bumped under SIN-64487 to
-# pick up the CVE-2026-42504 stdlib fix; the in-container compile matches CI).
+# a different Go version at build time (we want the pinned 1.26.3 alpine image,
+# matching go.mod's `toolchain go1.26.3` directive — bumped here as a follow-up
+# to SIN-62297 c4b2c73 toolchain pin so the in-container compile matches CI).
 # -X github.com/.../internal/version.commitSHA=${COMMIT_SHA} injects the SHA
 # into the server binary only — workers omit the -X so changing the build
 # arg does not bust their cached layers for unrelated rebuilds.
@@ -80,7 +80,7 @@ RUN go build -trimpath \
 # CA certs and the binary. The worker only needs outbound TCP to NATS,
 # Postgres, clamd, MinIO and Slack — distroless covers all of that via the
 # CA bundle baked into the base. See gcr.io/distroless/static for the contract.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1 AS crm-mediascan-worker
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-mediascan-worker
 
 COPY --from=builder /out/mediascan-worker /app/mediascan-worker
 
@@ -90,7 +90,7 @@ ENTRYPOINT ["/app/mediascan-worker"]
 
 # --- wallet-alerter-worker runtime ----------------------------------------
 # Same distroless contract as mediascan-worker. Outbound to NATS + Slack only.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1 AS crm-wallet-alerter-worker
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-wallet-alerter-worker
 
 COPY --from=builder /out/wallet-alerter-worker /app/wallet-alerter-worker
 
@@ -101,7 +101,7 @@ ENTRYPOINT ["/app/wallet-alerter-worker"]
 # --- server runtime (DEFAULT) ---------------------------------------------
 # Kept as the LAST stage so an unqualified `docker build .` still produces
 # the server image that cd-stg.yml has been pushing since SIN-62215.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1 AS crm-server
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-server
 
 COPY --from=builder /out/server /app/crm
 
