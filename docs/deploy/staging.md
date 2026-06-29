@@ -1076,6 +1076,207 @@ host means one of the three pre-conditions (DSN set + ACTOR_ID valid + DSN
 connects) is still failing — read the app boot log for
 `master tenants surface disabled` or `master pg connect` to see which.
 
+### 5f. Provision the `app_runtime` login password (runtime RLS role)
+
+The application's **runtime** pool — every tenant-facing request — must connect
+as the least-privilege `app_runtime` role (`LOGIN … NOSUPERUSER NOBYPASSRLS`,
+created by `migrations/0001_roles.up.sql`). That `NOBYPASSRLS` is what makes
+Row-Level Security the *enforced* DB half of tenant isolation (the `WithTenant`
+app half is the other). Like `app_master_ops` in §5e, the role is created
+**without a password** (ADR-0071 §"ops injects at deploy time"), so right after
+§5c migrations apply it exists but cannot authenticate.
+
+`deploy/compose/compose.stg.yml` composes a default `DATABASE_URL` from
+`POSTGRES_USER` / `POSTGRES_PASSWORD` — i.e. the **bootstrap superuser `crm`**,
+which is `BYPASSRLS`. If `.env.stg` does not override `DATABASE_URL` to point at
+`app_runtime`, RLS is silently OFF and tenants see each other's rows
+(SIN-65580). To prevent that failure mode from shipping, compose defaults
+`DB_ENFORCE_RLS_ROLE=1`, and the boot guard
+`postgres.EnforceRuntimeRLSRoleFromEnv` (SIN-65590) inspects `current_user` /
+`pg_roles` at startup and **refuses to boot** (`ErrRuntimeRoleBypassesRLS`) when
+the runtime DSN connects as a SUPERUSER/BYPASSRLS role. So with the secure
+default in place, the app will not start until this step has run and
+`DATABASE_URL` points at `app_runtime`.
+
+Generate the password the same way as the other infra secrets (hex — no
+`@:/?` that break DSN parsing) and store it in the password manager; it is a
+**secret** and MUST NOT be committed or pasted into a log/comment/thread:
+
+```bash
+openssl rand -hex 32   # APP_RUNTIME_PASSWORD
+```
+
+Set it on the role (idempotent — re-running just rotates the password):
+
+```bash
+COMPOSE_ARGS="--env-file /opt/crm/stg/.env.stg -f /opt/crm/stg/compose.stg.yml"
+read_env() { sudo grep -E "^${1}=" /opt/crm/stg/.env.stg | tail -n1 | cut -d= -f2-; }
+POSTGRES_USER_VAL="$(read_env POSTGRES_USER)"
+POSTGRES_DB_VAL="$(read_env POSTGRES_DB)"
+
+# Paste the openssl output above. Passing it through a psql variable (:'pw')
+# keeps the literal out of the SQL text and quotes it safely. The superuser-tier
+# POSTGRES_USER runs the ALTER (app_admin/app_runtime lack CREATEROLE, by design
+# — see 0001_roles.up.sql).
+APP_RUNTIME_PASSWORD="REPLACE_WITH_HEX_FROM_OPENSSL_RAND"
+
+sudo -u crm-deploy docker compose ${COMPOSE_ARGS} exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER_VAL}" -d "${POSTGRES_DB_VAL}" \
+       -v pw="${APP_RUNTIME_PASSWORD}" \
+  -c "ALTER ROLE app_runtime LOGIN PASSWORD :'pw';"
+```
+
+**Validation.** Confirm the role can authenticate with the new password (a
+successful `SELECT 1` means the DSN will connect at boot):
+
+```bash
+sudo -u crm-deploy docker compose ${COMPOSE_ARGS} exec -T postgres \
+  env PGPASSWORD="REPLACE_WITH_APP_RUNTIME_PASSWORD" \
+  psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U app_runtime -d "${POSTGRES_DB_VAL}" \
+  -c "SELECT 1;"
+```
+
+Now persist the override into the **file** `/opt/crm/stg/.env.stg` (edit the
+file — do **not** pass it inline with `docker compose run -e`, which would leak
+the password into shell history and `docker inspect`). Add these two lines; the
+DSN template and the flag are documented in `deploy/compose/.env.example`:
+
+```dotenv
+# Runtime pool authenticates as the NOBYPASSRLS app_runtime role so RLS is
+# actually enforced (SIN-65580 / SIN-65590). SECRET — never commit the real
+# password; store it in the password manager alongside POSTGRES_PASSWORD.
+DATABASE_URL=postgres://app_runtime:REPLACE_WITH_APP_RUNTIME_PASSWORD@postgres:5432/crm?sslmode=disable
+DB_ENFORCE_RLS_ROLE=1
+```
+
+**Leave `POSTGRES_USER=crm` untouched.** The `migrate-up` step still needs the
+superuser DDL privilege (it runs CREATE/ALTER on the schema), and the compose
+`postgres` service is initialised from `POSTGRES_USER` / `POSTGRES_PASSWORD`.
+Only the *application* pool is re-pointed, via the `DATABASE_URL` override —
+`app_runtime` deliberately lacks the privileges `migrate-up` requires.
+
+Restart the app so it re-reads `.env.stg`:
+
+```bash
+sudo -u crm-deploy docker compose ${COMPOSE_ARGS} up -d --force-recreate app
+```
+
+**Verification gate.** After the redeploy, the cd-stg `smoke check
+cross-tenant RLS` step (`scripts/ci/stg-smoke-rls-cross-tenant.sh`) must exit
+`0`: logged in as `agent@acme` it asserts the forbidden `agent@globex` seed
+UUID (`…0e0e02`) never appears in the `/inbox` list or the conversation
+assignment dropdown. A failure there — or the boot guard hard-failing with
+`ErrRuntimeRoleBypassesRLS` in the app log — means `DATABASE_URL` is still
+composing from the bootstrap superuser instead of `app_runtime`; re-check the
+override line above. (Until this step runs, the app does not boot at all, given
+the compose-default `DB_ENFORCE_RLS_ROLE=1`.)
+
+**No GitHub Actions secret is required.** `cd-stg` never sees the runtime
+password: `migrate-up` connects with `POSTGRES_*` (the superuser, for DDL), and
+the smokes are black-box HTTP checks against the deployed surface. The
+`app_runtime` password lives **only** in `/opt/crm/stg/.env.stg` on the VPS and
+in the password manager — same blast-radius posture as `MASTER_OPS_DATABASE_URL`
+in §5e.
+
+**Relationship to rotation.** `scripts/rotate-secret.sh db:app_runtime` is a
+*dual-role swap of an already-provisioned credential* — it requires
+`CRM_DB_ADMIN_DSN` (the `app_admin` role) to CREATE/RENAME the `app_runtime_next`
+role and assumes a live credential already exists. It does **not** bootstrap the
+very first password on a cold/DR-rebuilt host. This §5f is that bootstrap step,
+and it precedes the first rotation: provision here once, then rotate on the
+normal cadence per `docs/ops/secrets-rotation.md`.
+
+### 5g. Provision the WhatsApp-session (whatsmeow) DB roles (`wa_session_*`)
+
+> Only required when the non-official WhatsApp session transport is enabled
+> (`FEATURE_WA_SESSION_ENABLED=1`) and `WA_SESSION_DATABASE_URL` is set. The
+> transport is deny-by-default; skip this section entirely if it is off.
+
+The whatsmeow session credential store lives in a **dedicated** Postgres pointed
+at by `WA_SESSION_DATABASE_URL` (ADR 0107 D3), separate from the app DB. Its
+session keys are bearer credentials for the tenant's WhatsApp number, so the
+runtime DSN authenticates as a **least-privilege, DML-only** role distinct from
+`app_runtime` (ADR-0108 / SIN-66298). Two roles, created by
+`migrations/wa_session/0001_wa_session_roles.up.sql`:
+
+| Role                 | Privileges | Used by |
+|----------------------|-----------|---------|
+| `wa_session_runtime` | `USAGE` on schema + `SELECT/INSERT/UPDATE/DELETE` on `whatsmeow_*` only. **No DDL.** | the app boot DSN (`WA_SESSION_DATABASE_URL`) |
+| `wa_session_admin`   | `USAGE`+`CREATE` on schema; owns the `whatsmeow_*` tables. Runs the schema `Upgrade` (DDL). | the one-shot `Upgrade` deploy step below |
+
+Like the app roles, both are created **without a password**; ops injects them
+here. The split exists so a compromised `wa_session_runtime` cannot drop or alter
+the credential schema — it can only read/write session rows.
+
+**1) Apply the role migration (superuser DSN on the WA session cluster).**
+`CREATE ROLE` is superuser-only and cluster-scoped, so this runs with a superuser
+DSN against the WA session DB, not `app_admin`:
+
+```bash
+migrate -path migrations/wa_session \
+        -database "$WA_SESSION_SUPERUSER_DATABASE_URL" up
+```
+
+**2) Set login passwords on both roles** (hex — no `@:/?` that break DSN
+parsing; SECRETS — store in the password manager, never commit/paste):
+
+```bash
+openssl rand -hex 32   # WA_SESSION_RUNTIME_PASSWORD
+openssl rand -hex 32   # WA_SESSION_ADMIN_PASSWORD
+
+# Run as the WA session cluster superuser. :'pw' keeps the literal out of the
+# SQL text. Re-running just rotates the password (idempotent).
+psql -v ON_ERROR_STOP=1 "$WA_SESSION_SUPERUSER_DATABASE_URL" \
+     -v pw="REPLACE_WITH_WA_SESSION_RUNTIME_PASSWORD" \
+  -c "ALTER ROLE wa_session_runtime LOGIN PASSWORD :'pw';"
+psql -v ON_ERROR_STOP=1 "$WA_SESSION_SUPERUSER_DATABASE_URL" \
+     -v pw="REPLACE_WITH_WA_SESSION_ADMIN_PASSWORD" \
+  -c "ALTER ROLE wa_session_admin LOGIN PASSWORD :'pw';"
+```
+
+**3) Run the whatsmeow schema `Upgrade` ONCE, as `wa_session_admin`.** The app
+opens the store with `sqlstore.New`, which would run the schema `Upgrade` (DDL)
+on first contact — but `wa_session_runtime` is intentionally not allowed to run
+DDL. Run the `Upgrade` ahead of the app boot, connected as the admin role, so
+the boot path stays DDL-free. The `ALTER DEFAULT PRIVILEGES` set in step 1 means
+the tables this step creates auto-grant DML to `wa_session_runtime` — no second
+grant pass is needed. The key invariant is **the connection that creates/upgrades
+the `whatsmeow_*` tables is `wa_session_admin`, not the runtime role.**
+
+> **Re-run step 3 before every deploy that bumps the whatsmeow library version.**
+> A pending schema upgrade is DDL; if the app boots on a newer schema version as
+> `wa_session_runtime` before the admin `Upgrade` has run, boot fails closed
+> (insufficient privilege). On an already-current schema the boot `Upgrade` is a
+> read-only no-op and succeeds under `wa_session_runtime` (ADR-0108, verified by
+> `internal/adapter/db/postgres/wa_session_roles_migration_test.go`).
+
+**4) Point the app at the runtime role.** Build the runtime DSN from the
+`wa_session_runtime` password and write it into `/opt/crm/stg/.env.stg` (edit the
+file; never pass inline):
+
+```dotenv
+# WhatsApp session credential store — least-privilege, DML-only role (ADR-0108).
+# SECRET — never commit the real password.
+WA_SESSION_DATABASE_URL=postgres://wa_session_runtime:REPLACE_WITH_WA_SESSION_RUNTIME_PASSWORD@<wa-session-host>:5432/<wa_session_db>?sslmode=require
+```
+
+`sslmode=require` (or stricter) keeps the credential transport TLS-only, per the
+R1.1 controls. The `wa_session_admin` DSN is used **only** for step 3 and is not
+persisted into the app's runtime env.
+
+**Validation.** Confirm the runtime role authenticates and is DML-only:
+
+```bash
+# Authenticates + can read a whatsmeow_* table:
+PGPASSWORD="REPLACE_WITH_WA_SESSION_RUNTIME_PASSWORD" \
+  psql -v ON_ERROR_STOP=1 -h <wa-session-host> -U wa_session_runtime -d <wa_session_db> \
+  -c "SELECT count(*) FROM whatsmeow_device;"
+# Must FAIL with 'permission denied' — runtime has no DDL:
+PGPASSWORD="REPLACE_WITH_WA_SESSION_RUNTIME_PASSWORD" \
+  psql -h <wa-session-host> -U wa_session_runtime -d <wa_session_db> \
+  -c "CREATE TABLE should_fail (x int);" || echo "OK: runtime DDL correctly denied"
+```
+
 ### 6. Capturing the staging host key
 
 The runner verifies the VPS host key via `STG_HOST_KEY` to avoid TOFU. Capture
