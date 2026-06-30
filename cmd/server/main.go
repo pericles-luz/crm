@@ -259,6 +259,41 @@ func runWithListener(ctx context.Context, ln net.Listener, getenv func(string) s
 		wa.Register(mux)
 	}
 
+	// SIN-63105 — process-wide obs.Metrics constructed once at boot and
+	// shared by the SIN-63085 theme middleware (via buildBrandingStack),
+	// the SIN-62218 /metrics scrape endpoint + per-route HTTPMetrics
+	// middleware (via httpapi.Deps.Metrics), and the SIN-66260 WhatsApp
+	// session ban-observability tee below. Built here (ahead of the wa
+	// session wiring) so wa_session_status_transitions_total lands on the
+	// same registry that backs /metrics.
+	metrics := obs.NewMetrics()
+
+	// SIN-66258 WhatsApp session (non-official, whatsmeow) — Fase 3.
+	// Coexists with the official Meta Cloud channel above: deny-by-default
+	// (FEATURE_WA_SESSION_ENABLED=1 required) and opt-in per tenant
+	// (FEATURE_WA_SESSION_TENANTS). Flag off => nil wiring, no goroutines,
+	// behaviour unchanged. No HTTP routes: the session is a whatsmeow
+	// WebSocket client driven by the Manager, so we Start the inbound pump
+	// and per-tenant sessions instead of registering on the mux.
+	// SIN-66260 Fase 5: the boot obs.Metrics is passed so every per-tenant
+	// session status transition (notably to="banned", which is terminal and
+	// stops auto-reconnect) increments wa_session_status_transitions_total —
+	// the production ban signal the WASessionBanned alert keys on.
+	was := buildWASessionWiring(ctx, getenv, metrics)
+	var waSessionProv *managerProvisioner
+	if was != nil {
+		defer was.Cleanup()
+		was.Start()
+		waSessionProv = was.Provisioner
+	}
+
+	// SIN-66259 WhatsApp session — Fase 4 provisioning UI. Mounts the
+	// /settings/whatsapp-session* HTMX surface ONLY when the transport above
+	// is mounted (waSessionProv non-nil) and the audited consent registry
+	// can be built — deny-by-default. Routed below via iamHandlerOpts.
+	webWASessionHandler, webWASessionCleanup := buildWASessionUIHandler(ctx, getenv, waSessionProv)
+	defer webWASessionCleanup()
+
 	// SIN-62844 Messenger inbound webhook + outbound sender (F2-10 follow-up).
 	ms := buildMessengerWiring(ctx, getenv)
 	if ms != nil {
@@ -344,22 +379,15 @@ func runWithListener(ctx context.Context, ln net.Listener, getenv func(string) s
 	webFunnelRulesHandler, webFunnelRulesCleanup := buildWebFunnelRulesHandler(ctx, getenv)
 	defer webFunnelRulesCleanup()
 
-	// SIN-63105 — process-wide obs.Metrics constructed once at boot
-	// and shared by the SIN-63085 theme middleware (via
-	// buildBrandingStack) and the SIN-62218 /metrics scrape endpoint
-	// + per-route HTTPMetrics middleware (via httpapi.Deps.Metrics).
-	// One instance keeps tenant_theme_cache_hits_total reachable on
-	// the same /metrics endpoint that already exposes
-	// http_requests_total et al.
-	metrics := obs.NewMetrics()
-
-	// SIN-66295 — wire that SAME boot instance as the package-level default so
-	// the adapter-side canary helper obs.IncRLSMiss (postgres.WithTenant)
-	// stops being a permanent no-op. Without this call rls_misses_total is
-	// structurally flat-zero in production (SIN-62524 / PR #60 never wired it).
-	// SetDefault does NOT create a second instance: it stores the very pointer
-	// that already backs /metrics and the branding stack below, so /metrics
-	// keeps scraping the same registry.
+	// SIN-66295 — wire the SAME boot obs.Metrics instance (constructed
+	// ahead of the WhatsApp session wiring at SIN-66260, above) as the
+	// package-level default so the adapter-side canary helper
+	// obs.IncRLSMiss (postgres.WithTenant) stops being a permanent no-op.
+	// Without this call rls_misses_total is structurally flat-zero in
+	// production (SIN-62524 / PR #60 never wired it). SetDefault does NOT
+	// create a second instance: it stores the very pointer that already
+	// backs /metrics and the branding stack below, so /metrics keeps
+	// scraping the same registry.
 	obs.SetDefault(metrics)
 
 	// SIN-63084 + SIN-63085 + SIN-63101 — HTMX branding admin AND the
@@ -449,6 +477,7 @@ func runWithListener(ctx context.Context, ln net.Listener, getenv func(string) s
 		WebAIPanel:         webAIPanelHandler,
 		WebDashboard:       webDashboardHandler,
 		WebWallet:          webWalletHandler,
+		WebWASession:       webWASessionHandler,
 		Theme:              brandingStack.Theme,
 		Metrics:            metrics,
 		// SIN-66332 — dedicated app_audit pool (nil in dev) threaded to

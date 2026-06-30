@@ -32,6 +32,8 @@ var allSurfaceKeys = []string{
 	"privacy", "campaigns", "consent", "inbox", "contacts",
 	"campaign_public", "public_privacy", "chat",
 	"branding", "wallet", "billing_invoices",
+	// SIN-66259 / Fase 4 — WhatsApp session provisioning surface.
+	"wa_session",
 }
 
 func TestDeps_WebSurfaces_KeySet(t *testing.T) {
@@ -83,6 +85,7 @@ func TestDeps_WebSurfaces_PresentHandlersTrue(t *testing.T) {
 		WebBranding:        stubHandler,
 		WebWallet:          stubHandler,
 		WebBillingInvoices: stubHandler,
+		WebWASession:       stubHandler,
 	}
 	got := deps.WebSurfaces()
 	if len(got) != len(allSurfaceKeys) {
