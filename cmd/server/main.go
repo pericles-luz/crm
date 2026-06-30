@@ -349,26 +349,17 @@ func runWithListener(ctx context.Context, ln net.Listener, getenv func(string) s
 	webFunnelRulesHandler, webFunnelRulesCleanup := buildWebFunnelRulesHandler(ctx, getenv)
 	defer webFunnelRulesCleanup()
 
-	// SIN-63105 — process-wide obs.Metrics constructed once at boot
-	// and shared by the SIN-63085 theme middleware (via
-	// buildBrandingStack) and the SIN-62218 /metrics scrape endpoint
-	// + per-route HTTPMetrics middleware (via httpapi.Deps.Metrics).
-	// One instance keeps tenant_theme_cache_hits_total reachable on
-	// the same /metrics endpoint that already exposes
-	// http_requests_total et al.
-	metrics := obs.NewMetrics()
-
-	// SIN-66295 — wire that SAME boot instance as the package-level default so
-	// the adapter-side canary helper obs.IncRLSMiss (postgres.WithTenant)
-	// stops being a permanent no-op. Without this call rls_misses_total is
-	// structurally flat-zero in production (SIN-62524 / PR #60 never wired it).
-	// SetDefault does NOT create a second instance: it stores the very pointer
-	// that already backs /metrics and the branding stack below, so /metrics
-	// keeps scraping the same registry.
+	// SIN-66295 — wire the SAME boot obs.Metrics instance (constructed
+	// ahead of the WhatsApp session wiring at SIN-66260, above) as the
+	// package-level default so the adapter-side canary helper
+	// obs.IncRLSMiss (postgres.WithTenant) stops being a permanent no-op.
+	// Without this call rls_misses_total is structurally flat-zero in
+	// production (SIN-62524 / PR #60 never wired it). SetDefault does NOT
+	// create a second instance: it stores the very pointer that already
+	// backs /metrics and the branding stack below, so /metrics keeps
+	// scraping the same registry.
 	obs.SetDefault(metrics)
 
-	// SIN-66260 — the process-wide obs.Metrics constructed just above is
-	// reused for the WhatsApp session ban/disconnect wiring below.
 	// SIN-63084 + SIN-63085 + SIN-63101 — HTMX branding admin AND the
 	// per-tenant theme middleware. Both halves share the in-memory
 	// PaletteStore so a SIN-63084 save is visible to the next theme-
