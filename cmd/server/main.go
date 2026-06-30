@@ -291,7 +291,7 @@ func runWithListener(ctx context.Context, ln net.Listener, getenv func(string) s
 	// /settings/whatsapp-session* HTMX surface ONLY when the transport above
 	// is mounted (waSessionProv non-nil) and the audited consent registry
 	// can be built — deny-by-default. Routed below via iamHandlerOpts.
-	webWASessionHandler, webWASessionCleanup := buildWASessionUIHandler(ctx, getenv, waSessionProv)
+	webWASessionHandler, webWASessionCleanup := buildWASessionUIHandler(ctx, getenv, waSessionProv, auditPool)
 	defer webWASessionCleanup()
 
 	// SIN-62844 Messenger inbound webhook + outbound sender (F2-10 follow-up).
