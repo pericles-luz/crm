@@ -106,6 +106,29 @@ const (
 	// extending that migration first.
 	SecurityEventWASessionBanned       SecurityEvent = "wa_session.banned"
 	SecurityEventWASessionDisconnected SecurityEvent = "wa_session.disconnected"
+
+	// SIN-66405 (from SIN-66378 P3 security review, SIN-66392): per-channel
+	// access-change privilege events emitted by the channel-management admin
+	// surface (internal/web/channels). OWASP A09 (logging/monitoring) +
+	// least-privilege observability: granting or revoking a user's access to
+	// a channel, and flipping the channel's open↔restricted mode, are
+	// privilege changes that must leave a tamper-evident trail before GA.
+	//
+	//   * channel.access_granted     — a user was added to a channel's
+	//                                  access roster. Target carries
+	//                                  {channel_id, user_id}.
+	//   * channel.access_revoked     — a user was removed from the roster.
+	//                                  Target carries {channel_id, user_id}.
+	//   * channel.restricted_changed — the channel's restricted flag flipped.
+	//                                  Target carries {channel_id, from, to}.
+	//
+	// The actor is the authenticated gerente (the route is
+	// ActionTenantChannelsManage-gated); tenant_id is the channel's tenant.
+	// The CHECK clause in migration 0129 mirrors these three literals —
+	// extending the constants requires extending that migration first.
+	SecurityEventChannelAccessGranted     SecurityEvent = "channel.access_granted"
+	SecurityEventChannelAccessRevoked     SecurityEvent = "channel.access_revoked"
+	SecurityEventChannelRestrictedChanged SecurityEvent = "channel.restricted_changed"
 )
 
 // DataEvent is the controlled vocabulary of audit_log_data rows.
@@ -128,6 +151,17 @@ const (
 	DataEventConsentRevoke DataEvent = "consent_revoke"
 )
 
+// allSecurityEvents is the authoritative in-code copy of the
+// audit_log_security.event_type controlled vocabulary. It MUST stay in
+// lockstep with the DB CHECK constraint (latest: migration 0129). A
+// constant added here but not to the CHECK passes IsKnown() and every
+// unit test, yet its INSERT is rejected at runtime by the CHECK — and
+// because WriteSecurity is best-effort (warn-logged, never propagated)
+// the privilege event is silently dropped from the ledger (OWASP A09).
+// TestSecurityVocabulary_MatchesLatestCheckMigration
+// (split_vocab_drift_test.go, SIN-66410) fails the build the moment this
+// map and the CHECK diverge in either direction. When a future migration
+// extends the CHECK, bump that test's latestCheckMigration path.
 var allSecurityEvents = map[SecurityEvent]struct{}{
 	SecurityEventLogin:                    {},
 	SecurityEventLoginFail:                {},
@@ -151,6 +185,9 @@ var allSecurityEvents = map[SecurityEvent]struct{}{
 	SecurityEventMasterSessionHardCapHit:  {},
 	SecurityEventWASessionBanned:          {},
 	SecurityEventWASessionDisconnected:    {},
+	SecurityEventChannelAccessGranted:     {},
+	SecurityEventChannelAccessRevoked:     {},
+	SecurityEventChannelRestrictedChanged: {},
 }
 
 var allDataEvents = map[DataEvent]struct{}{
