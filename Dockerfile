@@ -26,7 +26,7 @@
 # syntax=docker/dockerfile:1.7
 
 # --- builder stage ---------------------------------------------------------
-FROM golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS builder
+FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 WORKDIR /src
 
@@ -80,7 +80,7 @@ RUN go build -trimpath \
 # CA certs and the binary. The worker only needs outbound TCP to NATS,
 # Postgres, clamd, MinIO and Slack — distroless covers all of that via the
 # CA bundle baked into the base. See gcr.io/distroless/static for the contract.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-mediascan-worker
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35 AS crm-mediascan-worker
 
 COPY --from=builder /out/mediascan-worker /app/mediascan-worker
 
@@ -90,7 +90,7 @@ ENTRYPOINT ["/app/mediascan-worker"]
 
 # --- wallet-alerter-worker runtime ----------------------------------------
 # Same distroless contract as mediascan-worker. Outbound to NATS + Slack only.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-wallet-alerter-worker
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35 AS crm-wallet-alerter-worker
 
 COPY --from=builder /out/wallet-alerter-worker /app/wallet-alerter-worker
 
@@ -101,7 +101,7 @@ ENTRYPOINT ["/app/wallet-alerter-worker"]
 # --- server runtime (DEFAULT) ---------------------------------------------
 # Kept as the LAST stage so an unqualified `docker build .` still produces
 # the server image that cd-stg.yml has been pushing since SIN-62215.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS crm-server
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35 AS crm-server
 
 COPY --from=builder /out/server /app/crm
 
