@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/pericles-luz/crm/internal/adapter/channels/llmcustomer"
+	"github.com/pericles-luz/crm/internal/adapter/channels/messenger"
 	"github.com/pericles-luz/crm/internal/contacts"
 	"github.com/pericles-luz/crm/internal/inbox"
 )
@@ -98,6 +99,48 @@ func TestCombinedOutboundContactLookup_WhatsAppChannel_NoIdentity_Errors(t *test
 	lookup := combinedOutboundContactLookup(convs, finder)
 	if _, err := lookup(context.Background(), uuid.New(), uuid.New()); err == nil {
 		t.Fatal("lookup: expected error for a contact with no whatsapp identity")
+	}
+}
+
+func TestCombinedOutboundContactLookup_MessengerChannel_FallsThroughToIdentity(t *testing.T) {
+	t.Parallel()
+	contactID := uuid.New()
+	convs := &fakeConversationResolver{conv: &inbox.Conversation{
+		Channel:   messenger.Channel,
+		ContactID: contactID,
+	}}
+	c := contacts.Hydrate(contactID, uuid.New(), "Ana", []contacts.ChannelIdentity{
+		{Channel: contacts.ChannelMessenger, ExternalID: "psid-123456"},
+	}, time.Now(), time.Now())
+	finder := &fakeContactIdentityFinder{contact: c}
+
+	lookup := combinedOutboundContactLookup(convs, finder)
+	got, err := lookup(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("lookup: unexpected error: %v", err)
+	}
+	if got != "psid-123456" {
+		t.Fatalf("lookup = %q, want psid-123456", got)
+	}
+}
+
+func TestCombinedOutboundContactLookup_MessengerChannel_IgnoresWhatsAppIdentity(t *testing.T) {
+	t.Parallel()
+	// A contact with ONLY a whatsapp identity must not satisfy a
+	// messenger-channel lookup — the two identity kinds must not cross-match.
+	contactID := uuid.New()
+	convs := &fakeConversationResolver{conv: &inbox.Conversation{
+		Channel:   messenger.Channel,
+		ContactID: contactID,
+	}}
+	c := contacts.Hydrate(contactID, uuid.New(), "Ana", []contacts.ChannelIdentity{
+		{Channel: contacts.ChannelWhatsApp, ExternalID: "+5511999990000"},
+	}, time.Now(), time.Now())
+	finder := &fakeContactIdentityFinder{contact: c}
+
+	lookup := combinedOutboundContactLookup(convs, finder)
+	if _, err := lookup(context.Background(), uuid.New(), uuid.New()); err == nil {
+		t.Fatal("lookup: expected error — contact has no messenger identity")
 	}
 }
 

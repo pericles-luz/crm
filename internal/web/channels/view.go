@@ -28,6 +28,12 @@ type channelType struct {
 const (
 	channelKeyWhatsApp    = "whatsapp"
 	channelKeyWhatsAppWeb = "whatsapp_web"
+	// channelKeyMessenger is the Facebook Messenger channel
+	// (internal/adapter/channels/messenger). Like WhatsApp API, both
+	// inbound and outbound are fully implemented — the identity entered
+	// at create time is the tenant's Facebook Page ID (all-digits, same
+	// shape as WhatsApp's phone_number_id).
+	channelKeyMessenger = "messenger"
 	// channelKeyFakeCustomer is the demo/QA "fake customer" channel
 	// (internal/adapter/channels/llmcustomer, channel key "fakellm"): an
 	// LLM plays the customer side of a synthetic conversation so an
@@ -50,6 +56,7 @@ const (
 var channelTypes = []channelType{
 	{Key: channelKeyWhatsApp, Label: "WhatsApp API"},
 	{Key: channelKeyWhatsAppWeb, Label: "WhatsApp Web"},
+	{Key: channelKeyMessenger, Label: "Messenger"},
 	{Key: "telegram", Label: "Telegram"},
 	{Key: "instagram", Label: "Instagram"},
 	{Key: "webchat", Label: "Webchat"},

@@ -10,6 +10,13 @@ import "strings"
 // (channel, external_id) UNIQUE index.
 const ChannelWhatsApp = "whatsapp"
 
+// ChannelMessenger is the canonical channel name for Facebook Messenger
+// identities (the customer's page-scoped id, PSID). Mirrors ChannelWhatsApp's
+// role: the webhook receiver (internal/adapter/channels/messenger) writes
+// this exact string, and outbound lookup code matches on it — see
+// combinedOutboundContactLookup (cmd/server/inbox_wire_real.go).
+const ChannelMessenger = "messenger"
+
 // e164MaxDigits is the ITU-T E.164 cap: a country code plus subscriber
 // number MUST NOT exceed 15 digits. With the leading '+' the string is
 // at most 16 bytes.
