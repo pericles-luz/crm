@@ -57,10 +57,26 @@ const defaultOutboundRateMaxPerMin = 600
 // present, or an empty Router no-op otherwise, so the caller never has to
 // nil-guard and boot never fails.
 func buildWhatsAppOutbound(getenv func(string) string, pool *pgxpool.Pool, rdb *goredis.Client, flag *channelswhatsapp.EnvFeatureFlag) inbox.OutboundChannel {
+	entry, ok := buildWhatsAppOutboundEntry(getenv, pool, rdb, flag)
+	if !ok {
+		return dispatch.NewRouter(nil)
+	}
+	return dispatch.NewRouter(map[string]inbox.OutboundChannel{channelswhatsapp.Channel: entry})
+}
+
+// buildWhatsAppOutboundEntry builds the decorated (idempotent +
+// rate-limited) WhatsApp sender WITHOUT wrapping it in a single-channel
+// Router, so callers that also wire other channels (e.g.
+// inbox_wire_real.go's fake-customer merge) can combine this entry with
+// others into one Router built once. ok=false means WhatsApp is disabled
+// (no META_GRAPH_TOKEN / construction error) — callers should omit the
+// entry from any combined route map rather than register a nil/no-op
+// value under the whatsapp key.
+func buildWhatsAppOutboundEntry(getenv func(string) string, pool *pgxpool.Pool, rdb *goredis.Client, flag *channelswhatsapp.EnvFeatureFlag) (inbox.OutboundChannel, bool) {
 	token := getenv("META_GRAPH_TOKEN")
 	if token == "" {
 		log.Printf("crm: whatsapp outbound dispatcher disabled (META_GRAPH_TOKEN unset) — no-op router")
-		return dispatch.NewRouter(nil)
+		return nil, false
 	}
 	lookup := channelwhatsapp.TenantConfigLookup(func(ctx context.Context, tenantID uuid.UUID) (channelwhatsapp.TenantConfig, error) {
 		pn, err := whatsappOutboundPhoneNumberID(ctx, pool, tenantID)
@@ -76,14 +92,14 @@ func buildWhatsAppOutbound(getenv func(string) string, pool *pgxpool.Pool, rdb *
 	sender, err := channelwhatsapp.New(token, lookup, prometheus.DefaultRegisterer)
 	if err != nil {
 		log.Printf("crm: whatsapp outbound dispatcher disabled — %v", err)
-		return dispatch.NewRouter(nil)
+		return nil, false
 	}
 	var limiter dispatch.RateLimiter
 	if rdb != nil {
 		limiter = rlredis.New(rdb, "whatsapp:out:")
 	}
 	log.Printf("crm: whatsapp outbound dispatcher ready")
-	return assembleWhatsAppOutbound(sender, limiter, outboundRateMaxPerMin(getenv))
+	return assembleWhatsAppOutboundEntry(sender, limiter, outboundRateMaxPerMin(getenv)), true
 }
 
 // assembleWhatsAppOutbound wraps a carrier sender in the outbound decorator
@@ -91,12 +107,20 @@ func buildWhatsAppOutbound(getenv func(string) string, pool *pgxpool.Pool, rdb *
 // buildWhatsAppOutbound so unit tests can wire a fake sender + limiter
 // without dialling Postgres/Redis or registering prometheus metrics.
 func assembleWhatsAppOutbound(sender inbox.OutboundChannel, limiter dispatch.RateLimiter, rateMax int) inbox.OutboundChannel {
+	oc := assembleWhatsAppOutboundEntry(sender, limiter, rateMax)
+	return dispatch.NewRouter(map[string]inbox.OutboundChannel{channelswhatsapp.Channel: oc})
+}
+
+// assembleWhatsAppOutboundEntry applies the decorator stack (rate limit,
+// then idempotency) WITHOUT the Router wrap — the building block both
+// assembleWhatsAppOutbound and buildWhatsAppOutboundEntry share.
+func assembleWhatsAppOutboundEntry(sender inbox.OutboundChannel, limiter dispatch.RateLimiter, rateMax int) inbox.OutboundChannel {
 	var oc inbox.OutboundChannel = sender
 	// Rate limit before idempotency's carrier call, but inside the
 	// idempotency claim so a deduped resend never consumes budget.
 	oc = dispatch.NewRateLimited(oc, limiter, time.Minute, rateMax, nil)
 	oc = dispatch.NewIdempotent(oc, dispatch.NewMemoryLedger())
-	return dispatch.NewRouter(map[string]inbox.OutboundChannel{channelswhatsapp.Channel: oc})
+	return oc
 }
 
 // whatsappOutboundPhoneNumberID (the per-tenant Meta phone_number_id

@@ -36,6 +36,32 @@ func TestBuildWhatsAppOutbound_DisabledWhenTokenMissing(t *testing.T) {
 	}
 }
 
+func TestBuildWhatsAppOutboundEntry_DisabledWhenTokenMissing(t *testing.T) {
+	t.Parallel()
+	// No META_GRAPH_TOKEN → ok=false, nil entry; caller omits it from any
+	// combined route map instead of registering a disabled value.
+	entry, ok := buildWhatsAppOutboundEntry(func(string) string { return "" }, nil, nil, nil)
+	if ok {
+		t.Fatalf("ok = true, want false when META_GRAPH_TOKEN is unset")
+	}
+	if entry != nil {
+		t.Fatalf("entry = %v, want nil when disabled", entry)
+	}
+}
+
+func TestBuildWhatsAppOutbound_WrapsEntryInSingleChannelRouter(t *testing.T) {
+	t.Parallel()
+	// buildWhatsAppOutbound must keep behaving as a self-contained,
+	// single-channel Router (regression guard for the split): a message
+	// on any OTHER channel key must still be denied even when WhatsApp
+	// itself is disabled.
+	oc := buildWhatsAppOutbound(func(string) string { return "" }, nil, nil, nil)
+	_, err := oc.SendMessage(context.Background(), inbox.OutboundMessage{Channel: "fakellm", TenantID: uuid.New()})
+	if !errors.Is(err, inbox.ErrChannelDisabled) {
+		t.Errorf("err = %v, want ErrChannelDisabled for an unrelated channel key", err)
+	}
+}
+
 func TestAssembleWhatsAppOutbound_RoutesWhatsAppThroughStack(t *testing.T) {
 	t.Parallel()
 	sender := &dispatchStubSender{wamid: "wamid.assembled"}
