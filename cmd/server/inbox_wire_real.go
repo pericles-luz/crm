@@ -51,6 +51,7 @@ import (
 
 	"github.com/pericles-luz/crm/internal/adapter/channel/dispatch"
 	"github.com/pericles-luz/crm/internal/adapter/channels/llmcustomer"
+	"github.com/pericles-luz/crm/internal/adapter/channels/messenger"
 	"github.com/pericles-luz/crm/internal/adapter/channels/whatsapp"
 	pgpool "github.com/pericles-luz/crm/internal/adapter/db/postgres"
 	pgcontacts "github.com/pericles-luz/crm/internal/adapter/db/postgres/contacts"
@@ -154,6 +155,17 @@ func assembleInboxHandlerRealFromPool(pool *pgxpool.Pool, rdb *goredis.Client, g
 	flag := whatsapp.NewEnvFeatureFlag(getenv)
 	if entry, ok := buildWhatsAppOutboundEntry(getenv, pool, rdb, flag); ok {
 		routes[whatsapp.Channel] = entry
+	}
+
+	// Messenger entry: same shape as WhatsApp — real routed Sender when
+	// META_GRAPH_TOKEN is present, absent otherwise. buildMessengerOutboundEntry
+	// (messenger_wire.go) is the ONLY construction site for the Messenger
+	// sender — do not also build one in messenger_wire.go's inbound
+	// assembly (see that file's doc comment for the duplicate-Prometheus-
+	// registration panic this would otherwise cause).
+	msgFlag := messenger.NewEnvFeatureFlag(getenv)
+	if entry, ok := buildMessengerOutboundEntry(getenv, pool, rdb, msgFlag); ok {
+		routes[messenger.Channel] = entry
 	}
 
 	// Fake-customer entry (opt-in, INBOX_FAKE_CUSTOMER_ENABLED=1): lets
@@ -314,10 +326,10 @@ func buildFakeCustomerAdapter(pool *pgxpool.Pool, inboxStore *pginbox.Store, con
 // combinedOutboundContactLookup resolves a conversation to the recipient's
 // channel-side identity: the fake-customer channel always answers with its
 // fixed synthetic contact id (one persona per tenant, mirroring
-// inbox_wire_llmcustomer.go's syntheticLookup); every other channel falls
-// through to the WhatsApp E.164 lookup (whatsapp_outbound_wire.go's
-// whatsappOutboundContactLookup inlined here since both need the same
-// conversation read first).
+// inbox_wire_llmcustomer.go's syntheticLookup); WhatsApp and Messenger fall
+// through to the matching contact identity (E.164 / PSID respectively) —
+// whatsapp_outbound_wire.go's whatsappOutboundContactLookup inlined here
+// since every branch needs the same conversation read first.
 func combinedOutboundContactLookup(convs conversationResolver, finder contactIdentityFinder) inboxusecase.ContactLookupFn {
 	return func(ctx context.Context, tenantID, conversationID uuid.UUID) (string, error) {
 		conv, err := convs.GetConversation(ctx, tenantID, conversationID)
@@ -327,15 +339,19 @@ func combinedOutboundContactLookup(convs conversationResolver, finder contactIde
 		if conv.Channel == llmcustomer.ChannelName {
 			return llmcustomer.SyntheticContactExternalID, nil
 		}
+		identityChannel := contacts.ChannelWhatsApp
+		if conv.Channel == messenger.Channel {
+			identityChannel = contacts.ChannelMessenger
+		}
 		c, err := finder.FindByID(ctx, tenantID, conv.ContactID)
 		if err != nil {
 			return "", err
 		}
 		for _, id := range c.Identities() {
-			if id.Channel == contacts.ChannelWhatsApp {
+			if id.Channel == identityChannel {
 				return id.ExternalID, nil
 			}
 		}
-		return "", fmt.Errorf("outbound: contact %s has no whatsapp identity", conv.ContactID)
+		return "", fmt.Errorf("outbound: contact %s has no %s identity", conv.ContactID, identityChannel)
 	}
 }
