@@ -171,6 +171,17 @@ func newHandler(t *testing.T, repo *fakeRepo, acc *fakeAccess) http.Handler {
 	return mux
 }
 
+func newHandlerWithFakeCustomer(t *testing.T, repo *fakeRepo, acc *fakeAccess, fakeCustomerEnabled bool) http.Handler {
+	t.Helper()
+	h, err := webchannels.New(webchannels.Deps{Channels: repo, Access: acc, FakeCustomerEnabled: fakeCustomerEnabled})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mux := http.NewServeMux()
+	h.Routes(mux)
+	return mux
+}
+
 func do(t *testing.T, mux http.Handler, method, target string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	var body *strings.Reader
@@ -368,6 +379,52 @@ func TestCreate_Conflict(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Já existe um canal") {
 		t.Fatalf("missing conflict error\nbody=%s", rec.Body.String())
+	}
+}
+
+func TestCreate_FakeCustomer_BouncedWhenDisabled(t *testing.T) {
+	repo := newFakeRepo()
+	mux := newHandlerWithFakeCustomer(t, repo, newFakeAccess(), false)
+	form := url.Values{}
+	form.Set("name", "Cliente Fake")
+	form.Set("channel_key", "fakellm")
+	rec := do(t, mux, http.MethodPost, "/settings/channels", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if len(repo.created) != 0 {
+		t.Fatalf("fakellm channel must not be created while FakeCustomerEnabled=false")
+	}
+	if !strings.Contains(rec.Body.String(), "desativado") {
+		t.Fatalf("missing not-ready bounce message\nbody=%s", rec.Body.String())
+	}
+}
+
+func TestCreate_FakeCustomer_SucceedsWhenEnabled(t *testing.T) {
+	repo := newFakeRepo()
+	u1, u2 := rosterUser("ana", "tenant_atendente"), rosterUser("bia", "tenant_gerente")
+	acc := newFakeAccess(u1, u2)
+	mux := newHandlerWithFakeCustomer(t, repo, acc, true)
+
+	form := url.Values{}
+	form.Set("name", "Cliente Fake")
+	form.Set("channel_key", "fakellm")
+	form.Add("user_ids", u1.ID.String())
+
+	rec := do(t, mux, http.MethodPost, "/settings/channels", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(repo.created) != 1 {
+		t.Fatalf("want 1 channel created, got %d", len(repo.created))
+	}
+	created := repo.created[0]
+	if created.ChannelKey != "fakellm" {
+		t.Fatalf("channel_key = %q, want fakellm", created.ChannelKey)
+	}
+	got := acc.replaced[created.ID]
+	if len(got) != 1 || got[0] != u1.ID {
+		t.Fatalf("roster grant = %v, want [%s] — ReplaceAccess must run for the generic (non-WhatsApp) create path", got, u1.ID)
 	}
 }
 

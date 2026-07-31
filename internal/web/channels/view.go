@@ -28,6 +28,14 @@ type channelType struct {
 const (
 	channelKeyWhatsApp    = "whatsapp"
 	channelKeyWhatsAppWeb = "whatsapp_web"
+	// channelKeyFakeCustomer is the demo/QA "fake customer" channel
+	// (internal/adapter/channels/llmcustomer, channel key "fakellm"): an
+	// LLM plays the customer side of a synthetic conversation so an
+	// operator can exercise the inbox loop without a real carrier.
+	// Functional readiness is gated by INBOX_FAKE_CUSTOMER_ENABLED at
+	// create time (Deps.FakeCustomerEnabled), same pattern as
+	// WhatsAppWebEnabled for whatsapp_web.
+	channelKeyFakeCustomer = "fakellm"
 )
 
 // channelTypes is the ordered, closed set of channel families the admin
@@ -46,6 +54,7 @@ var channelTypes = []channelType{
 	{Key: "instagram", Label: "Instagram"},
 	{Key: "webchat", Label: "Webchat"},
 	{Key: "email", Label: "E-mail"},
+	{Key: channelKeyFakeCustomer, Label: "Cliente Fake (Demo)"},
 }
 
 // allChannelTypes returns a fresh copy of the closed registry so the create
