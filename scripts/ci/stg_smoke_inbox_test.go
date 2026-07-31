@@ -22,8 +22,9 @@
 //     binary); smoke degrades — same as disabled.
 //   - preflight_provider_unknown: /health reports a non-enum value;
 //     stage=preflight, exit 1.
-//   - preflight_provider_real: /health reports the reserved-but-
-//     unwired carrier slot; stage=preflight, exit 1.
+//   - preflight_provider_real: /health reports the live WhatsApp Cloud
+//     API wire; smoke degrades — auth + /inbox 200 + exit 0, same as
+//     disabled (CI cannot trigger a real inbound WhatsApp message).
 //   - degraded_inbox_empty: degraded mode tolerates the empty-list
 //     template (no llmcustomer bootstrap, no stage=bootstrap fail).
 //   - route_404: /inbox responds 404; stage=route, exit 1.
@@ -326,17 +327,25 @@ func TestSmoke_PreflightProviderUnknown(t *testing.T) {
 
 func TestSmoke_PreflightProviderReal(t *testing.T) {
 	t.Parallel()
-	// The reserved-but-unwired carrier slot is rejected because the
-	// smoke does not yet know how to exercise a real carrier loop.
+	// provider=real is the live WhatsApp Cloud API wire (and, optionally,
+	// the fake-customer channel layered on top via
+	// INBOX_FAKE_CUSTOMER_ENABLED) — a legitimate, intended deploy
+	// configuration. This script cannot trigger an inbound WhatsApp
+	// message from CI, so it degrades to the same auth + /inbox route
+	// contract check as disabled/unset rather than failing the deploy.
 	base := newInboxFake(t, inboxFakeOptions{
 		HealthProvider: "real",
+		InboxEmpty:     true,
 	})
 	out, code := runSmoke(t, base)
-	if code == 0 {
-		t.Fatalf("smoke exit=0 want non-zero for provider=real\n%s", out)
+	if code != 0 {
+		t.Fatalf("smoke exit=%d want 0 (provider=real must degrade, not fail)\n%s", code, out)
 	}
-	if !strings.Contains(out, "stage=preflight") {
-		t.Fatalf("smoke output missing stage=preflight failure label\n%s", out)
+	if !strings.Contains(out, `stage=preflight degrade — provider="real"`) {
+		t.Fatalf("smoke output missing the provider=real degrade label\n%s", out)
+	}
+	if strings.Contains(out, "stage=bootstrap") {
+		t.Fatalf("degraded smoke tripped stage=bootstrap for provider=real (must be skipped)\n%s", out)
 	}
 }
 
