@@ -35,6 +35,15 @@ type Adapter struct {
 	media   MediaScanPublisher
 	clock   Clock
 	logger  *slog.Logger
+
+	// statusUpdater, contacts, and conversations back the
+	// message_deliveries/message_reads handlers (status_reconciler.go).
+	// All optional (nil-checked at call time) so a deployment that
+	// hasn't wired them yet still boots — the two events simply drop
+	// with a warn log instead of panicking.
+	statusUpdater inbox.MessageStatusUpdater
+	contacts      contactLookup
+	conversations conversationLookup
 }
 
 // Option mutates an Adapter at construction time. Tests use options to

@@ -26,9 +26,11 @@ const SignatureHeader = metashared.SignatureHeader
 
 // messengerEnvelope is the permissive subset of the Meta Messenger
 // webhook payload the handler consumes. Fields we do not need (echoes,
-// reactions, message_reads, etc.) are intentionally absent so an
-// upstream schema change in those areas cannot break JSON parsing —
-// encoding/json ignores unknown fields by default.
+// reactions, etc.) are intentionally absent so an upstream schema
+// change in those areas cannot break JSON parsing — encoding/json
+// ignores unknown fields by default. message_deliveries and
+// message_reads ARE modelled (envelMessage.Delivery / .Read — see
+// status_reconciler.go).
 type messengerEnvelope struct {
 	Object string       `json:"object"`
 	Entry  []envelEntry `json:"entry"`
@@ -45,6 +47,13 @@ type envelMessage struct {
 	Recipient envelActor   `json:"recipient"`
 	Timestamp int64        `json:"timestamp"` // milliseconds since epoch
 	Message   envelMsgBody `json:"message"`
+	// Delivery / Read carry the message_deliveries / message_reads
+	// webhook fields (see status_reconciler.go). Meta never sets more
+	// than one of Message/Delivery/Read on the same messaging[] entry,
+	// so a nil check on these pointers discriminates the envelope kind
+	// before deliverMessage's empty-mid drop would otherwise swallow it.
+	Delivery *envelDelivery `json:"delivery,omitempty"`
+	Read     *envelRead     `json:"read,omitempty"`
 }
 
 type envelActor struct {
@@ -149,7 +158,14 @@ func (a *Adapter) deliverEntry(ctx context.Context, entry envelEntry) {
 		return
 	}
 	for _, m := range entry.Messaging {
-		a.deliverMessage(ctx, tenantID, pageID, m)
+		switch {
+		case m.Delivery != nil:
+			a.deliverDelivery(ctx, tenantID, pageID, m)
+		case m.Read != nil:
+			a.deliverRead(ctx, tenantID, pageID, m)
+		default:
+			a.deliverMessage(ctx, tenantID, pageID, m)
+		}
 	}
 }
 
@@ -168,9 +184,11 @@ func (a *Adapter) deliverEntry(ctx context.Context, entry envelEntry) {
 func (a *Adapter) deliverMessage(ctx context.Context, tenantID uuid.UUID, pageID string, m envelMessage) {
 	mid := strings.TrimSpace(m.Message.MID)
 	if mid == "" {
-		// Statuses-only envelopes (echo, message_reads, etc.) reach
-		// here with an empty mid — drop silently at debug level so
-		// the warn-level signal stays meaningful for real bugs.
+		// message_deliveries/message_reads are intercepted before this
+		// function by deliverEntry's dispatch switch; anything else
+		// with an empty mid (echoes, reactions, etc.) drops silently at
+		// debug level so the warn-level signal stays meaningful for
+		// real bugs.
 		a.logger.Debug("messenger.missing_mid",
 			slog.String("tenant_id", tenantID.String()),
 			slog.String("page_id", pageID))
