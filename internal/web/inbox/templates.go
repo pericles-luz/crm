@@ -513,9 +513,9 @@ var conversationListTmpl = template.Must(template.New("conversation_list").Funcs
 `))
 
 // channelBadgeTmpl renders a per-channel SVG icon plus a screen-reader-
-// only label. The four supported channels (whatsapp / instagram /
-// facebook / chatbot) carry brand-aligned glyphs; unknown channels
-// degrade to a neutral dot so the badge grid never collapses.
+// only label. The five supported channels (whatsapp / instagram /
+// facebook / messenger / chatbot) carry brand-aligned glyphs; unknown
+// channels degrade to a neutral dot so the badge grid never collapses.
 //
 // WCAG 1.4.1 (cor não-único diferenciador): every badge pairs the
 // channel-coloured SVG with a screen-reader text label and a
@@ -527,6 +527,8 @@ var channelBadgeTmpl = template.Must(template.New("channel_badge").Funcs(templat
 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2.2c3.2 0 3.58.01 4.85.07 1.17.05 1.8.25 2.23.41.56.22.96.48 1.38.9.42.42.68.82.9 1.38.16.42.36 1.06.41 2.23.06 1.27.07 1.65.07 4.85s-.01 3.58-.07 4.85c-.05 1.17-.25 1.8-.41 2.23-.22.56-.48.96-.9 1.38-.42.42-.82.68-1.38.9-.42.16-1.06.36-2.23.41-1.27.06-1.65.07-4.85.07s-3.58-.01-4.85-.07c-1.17-.05-1.8-.25-2.23-.41-.56-.22-.96-.48-1.38-.9-.42-.42-.68-.82-.9-1.38-.16-.42-.36-1.06-.41-2.23C2.21 15.58 2.2 15.2 2.2 12s.01-3.58.07-4.85c.05-1.17.25-1.8.41-2.23.22-.56.48-.96.9-1.38.42-.42.82-.68 1.38-.9.42-.16 1.06-.36 2.23-.41C8.42 2.21 8.8 2.2 12 2.2zm0 1.8c-3.15 0-3.5.01-4.74.07-1 .04-1.55.21-1.91.35-.48.19-.83.41-1.19.77-.36.36-.58.71-.77 1.19-.14.36-.31.91-.35 1.91C3 8.5 2.99 8.85 2.99 12s.01 3.5.07 4.74c.04 1 .21 1.55.35 1.91.19.48.41.83.77 1.19.36.36.71.58 1.19.77.36.14.91.31 1.91.35 1.24.06 1.59.07 4.74.07s3.5-.01 4.74-.07c1-.04 1.55-.21 1.91-.35.48-.19.83-.41 1.19-.77.36-.36.58-.71.77-1.19.14-.36.31-.91.35-1.91.06-1.24.07-1.59.07-4.74s-.01-3.5-.07-4.74c-.04-1-.21-1.55-.35-1.91a3.2 3.2 0 0 0-.77-1.19 3.2 3.2 0 0 0-1.19-.77c-.36-.14-.91-.31-1.91-.35C15.5 4.01 15.15 4 12 4zm0 3.07a4.93 4.93 0 1 1 0 9.86 4.93 4.93 0 0 1 0-9.86zm0 1.8a3.13 3.13 0 1 0 0 6.26 3.13 3.13 0 0 0 0-6.26zm5.07-2.13a1.15 1.15 0 1 1 0 2.3 1.15 1.15 0 0 1 0-2.3z"/></svg>
 {{- else if eq . "facebook" -}}
 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M22 12a10 10 0 1 0-11.56 9.88v-6.99H7.9V12h2.54V9.8c0-2.51 1.5-3.9 3.78-3.9 1.1 0 2.24.2 2.24.2v2.46h-1.26c-1.24 0-1.63.77-1.63 1.56V12h2.78l-.44 2.89h-2.34v6.99A10 10 0 0 0 22 12z"/></svg>
+{{- else if eq . "messenger" -}}
+<svg viewBox="0 0 512 512" width="20" height="20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M256 32C114.6 32 0 137.8 0 268.2c0 72.3 35.5 137 90.9 180.9V512l83.1-45.6c22.2 6.1 45.7 9.4 70 9.4 141.4 0 256-105.8 256-236.2S397.4 32 256 32zm25.9 318.3l-65.4-69.8-127.7 69.8L217 195.9l67 69.8 126.4-69.8-127.5 154.4z"/></svg>
 {{- else if eq . "chatbot" -}}
 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a2 2 0 0 0-2 2v1H7a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V8a3 3 0 0 0-3-3h-3V4a2 2 0 0 0-2-2zM8.5 11a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zM3 11.5A1.5 1.5 0 0 0 1.5 13v2a1.5 1.5 0 0 0 3 0v-2A1.5 1.5 0 0 0 3 11.5zm18 0a1.5 1.5 0 0 0-1.5 1.5v2a1.5 1.5 0 0 0 3 0v-2A1.5 1.5 0 0 0 21 11.5z"/></svg>
 {{- else -}}
