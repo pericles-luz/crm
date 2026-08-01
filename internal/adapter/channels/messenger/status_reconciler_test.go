@@ -85,7 +85,9 @@ type fakeContactLookup struct {
 	err    error
 }
 
-func newFakeContactLookup() *fakeContactLookup { return &fakeContactLookup{byPSID: map[string]*contacts.Contact{}} }
+func newFakeContactLookup() *fakeContactLookup {
+	return &fakeContactLookup{byPSID: map[string]*contacts.Contact{}}
+}
 
 func (f *fakeContactLookup) Register(psid string, c *contacts.Contact) { f.byPSID[psid] = c }
 
