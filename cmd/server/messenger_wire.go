@@ -225,6 +225,41 @@ func buildMessengerOutboundEntry(getenv func(string) string, pool *pgxpool.Pool,
 // Messenger sends. Useful when the Facebook Page is authorized under a
 // different Business Manager / system user than the WhatsApp Business
 // Account (so a single META_GRAPH_TOKEN can't cover both products).
+//
+// IMPORTANT — this MUST be a Page Access Token, not a User or System User
+// access token, even one with pages_messaging/pages_show_list/
+// pages_manage_metadata granted and the Page correctly assigned as a
+// Business Asset. The Messenger Send API (POST /{page-id}/messages)
+// silently rejects any non-Page-scoped bearer token with a generic
+// {"error":{"message":"An unknown error has occurred.","type":"OAuthException","code":1}}
+// and HTTP 500 — there is no clearer error message pointing at the real
+// cause. This cost real debugging time in staging (2026-07-31): a System
+// User token with every seemingly-relevant permission and asset
+// assignment kept failing until it was exchanged for the Page's own
+// derived token.
+//
+// How to get a Page Access Token that doesn't expire:
+//  1. In the Graph API Explorer (developers.facebook.com/tools/explorer),
+//     select the App, choose "User Token" (not "Page Access Token" —
+//     that dropdown option derives a short-lived one), and add the
+//     pages_show_list, pages_messaging, and pages_manage_metadata
+//     permissions. Generate the token.
+//  2. Open the Access Token Debugger
+//     (developers.facebook.com/tools/debug/accesstoken/), paste that
+//     token, and click "Extend Access Token" — this trades the ~1-2h
+//     token for a ~60-day long-lived User token.
+//  3. Call `GET /me/accounts` with that long-lived User token (in
+//     Explorer or via curl). The response's `data[].access_token` field
+//     for the target Page is a long-lived Page Access Token — it does
+//     not expire on its own as long as the authorizing user keeps their
+//     role on the Page and doesn't revoke the app. That value is what
+//     goes in META_MESSENGER_GRAPH_TOKEN.
+//
+// A Business Manager System User token IS the right shape for WhatsApp
+// (META_GRAPH_TOKEN) — the WhatsApp Cloud API has no equivalent
+// Page-token exchange step and accepts the System User token directly
+// against /{phone_number_id}/messages. This distinction is Messenger-
+// specific.
 const envMessengerGraphToken = "META_MESSENGER_GRAPH_TOKEN"
 
 // messengerOutboundGraphToken reads META_MESSENGER_GRAPH_TOKEN, falling
