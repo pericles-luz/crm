@@ -249,16 +249,20 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		h.renderCreateModal(w, r, tenant.ID, name, key, identity, userIDs, restricted, "type", fakeCustomerNotReadyMsg)
 		return
 	}
-	// Meta channel onboarding (WhatsApp API: SIN-67143, Messenger: mirrors
-	// it): when the association writer is wired (production always wires
-	// it; nil ⇒ feature-flag skip) the identity is the Meta
-	// phone_number_id (WhatsApp) or Facebook Page ID (Messenger) and must
+	// Meta channel onboarding (WhatsApp API: SIN-67143, Messenger and
+	// Instagram mirror it): when the association writer is wired
+	// (production always wires it; nil ⇒ feature-flag skip) the identity
+	// is the Meta phone_number_id (WhatsApp), Facebook Page ID
+	// (Messenger), or Instagram Business Account id (Instagram) and must
 	// be all-digits. Validate at the boundary, BEFORE any persistence, so
 	// a malformed id never reaches storage or the webhook resolver.
-	if (key == channelKeyWhatsApp || key == channelKeyMessenger) && h.deps.Associations != nil && !isAllDigits(identity) {
+	if (key == channelKeyWhatsApp || key == channelKeyMessenger || key == channelKeyInstagram) && h.deps.Associations != nil && !isAllDigits(identity) {
 		msg := "phone_number_id deve conter apenas dígitos."
-		if key == channelKeyMessenger {
+		switch key {
+		case channelKeyMessenger:
 			msg = "Page ID deve conter apenas dígitos."
+		case channelKeyInstagram:
+			msg = "ID da conta comercial do Instagram deve conter apenas dígitos."
 		}
 		h.renderCreateModal(w, r, tenant.ID, name, key, identity, userIDs, restricted, "identity", msg)
 		return
@@ -280,14 +284,15 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "create channel", err)
 		return
 	}
-	// Persist the phone_number_id/page_id → tenant association so the
-	// inbound webhook entry-point can resolve this tenant (SIN-67143 +
-	// Messenger mirror). The channel row already committed above; a write
-	// failure surfaces as a 500 rather than silently leaving the channel
-	// unroutable. The identity was validated all-digits at the boundary
-	// above. Pass `key`, not a hardcoded channel constant — a Messenger
-	// Page ID must be filed under channel="messenger", not "whatsapp".
-	if (key == channelKeyWhatsApp || key == channelKeyMessenger) && h.deps.Associations != nil {
+	// Persist the phone_number_id/page_id/ig_business_id → tenant
+	// association so the inbound webhook entry-point can resolve this
+	// tenant (SIN-67143 + Messenger/Instagram mirror). The channel row
+	// already committed above; a write failure surfaces as a 500 rather
+	// than silently leaving the channel unroutable. The identity was
+	// validated all-digits at the boundary above. Pass `key`, not a
+	// hardcoded channel constant — a Messenger Page ID must be filed
+	// under channel="messenger", not "whatsapp".
+	if (key == channelKeyWhatsApp || key == channelKeyMessenger || key == channelKeyInstagram) && h.deps.Associations != nil {
 		if err := h.deps.Associations.SaveAssociation(r.Context(), tenant.ID, key, identity); err != nil {
 			h.fail(w, "save channel association", err)
 			return

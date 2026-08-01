@@ -50,6 +50,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/pericles-luz/crm/internal/adapter/channel/dispatch"
+	"github.com/pericles-luz/crm/internal/adapter/channels/instagram"
 	"github.com/pericles-luz/crm/internal/adapter/channels/llmcustomer"
 	"github.com/pericles-luz/crm/internal/adapter/channels/messenger"
 	"github.com/pericles-luz/crm/internal/adapter/channels/whatsapp"
@@ -166,6 +167,17 @@ func assembleInboxHandlerRealFromPool(pool *pgxpool.Pool, rdb *goredis.Client, g
 	msgFlag := messenger.NewEnvFeatureFlag(getenv)
 	if entry, ok := buildMessengerOutboundEntry(getenv, pool, rdb, msgFlag); ok {
 		routes[messenger.Channel] = entry
+	}
+
+	// Instagram entry: same shape as WhatsApp/Messenger — real routed
+	// Sender when META_INSTAGRAM_GRAPH_TOKEN/META_GRAPH_TOKEN is present,
+	// absent otherwise. buildInstagramOutboundEntry (instagram_outbound_wire.go)
+	// is the ONLY construction site for the Instagram sender — do not
+	// also build one in instagram_wire.go's inbound assembly (duplicate-
+	// Prometheus-registration panic, see that file's doc comment).
+	igFlag := instagram.NewEnvFeatureFlag(getenv)
+	if entry, ok := buildInstagramOutboundEntry(getenv, pool, rdb, igFlag); ok {
+		routes[instagram.Channel] = entry
 	}
 
 	// Fake-customer entry (opt-in, INBOX_FAKE_CUSTOMER_ENABLED=1): lets
@@ -326,10 +338,11 @@ func buildFakeCustomerAdapter(pool *pgxpool.Pool, inboxStore *pginbox.Store, con
 // combinedOutboundContactLookup resolves a conversation to the recipient's
 // channel-side identity: the fake-customer channel always answers with its
 // fixed synthetic contact id (one persona per tenant, mirroring
-// inbox_wire_llmcustomer.go's syntheticLookup); WhatsApp and Messenger fall
-// through to the matching contact identity (E.164 / PSID respectively) —
-// whatsapp_outbound_wire.go's whatsappOutboundContactLookup inlined here
-// since every branch needs the same conversation read first.
+// inbox_wire_llmcustomer.go's syntheticLookup); WhatsApp, Messenger, and
+// Instagram fall through to the matching contact identity (E.164 / PSID /
+// IGSID respectively) — whatsapp_outbound_wire.go's
+// whatsappOutboundContactLookup inlined here since every branch needs the
+// same conversation read first.
 func combinedOutboundContactLookup(convs conversationResolver, finder contactIdentityFinder) inboxusecase.ContactLookupFn {
 	return func(ctx context.Context, tenantID, conversationID uuid.UUID) (string, error) {
 		conv, err := convs.GetConversation(ctx, tenantID, conversationID)
@@ -342,6 +355,8 @@ func combinedOutboundContactLookup(convs conversationResolver, finder contactIde
 		identityChannel := contacts.ChannelWhatsApp
 		if conv.Channel == messenger.Channel {
 			identityChannel = contacts.ChannelMessenger
+		} else if conv.Channel == instagram.Channel {
+			identityChannel = contacts.ChannelInstagram
 		}
 		c, err := finder.FindByID(ctx, tenantID, conv.ContactID)
 		if err != nil {

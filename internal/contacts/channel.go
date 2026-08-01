@@ -17,6 +17,14 @@ const ChannelWhatsApp = "whatsapp"
 // combinedOutboundContactLookup (cmd/server/inbox_wire_real.go).
 const ChannelMessenger = "messenger"
 
+// ChannelInstagram is the canonical channel name for Instagram Direct
+// identities (the customer's Instagram-scoped id, IGSID). Mirrors
+// ChannelMessenger's role: the webhook receiver
+// (internal/adapter/channels/instagram) writes this exact string, and
+// outbound lookup code matches on it — see combinedOutboundContactLookup
+// (cmd/server/inbox_wire_real.go).
+const ChannelInstagram = "instagram"
+
 // e164MaxDigits is the ITU-T E.164 cap: a country code plus subscriber
 // number MUST NOT exceed 15 digits. With the leading '+' the string is
 // at most 16 bytes.

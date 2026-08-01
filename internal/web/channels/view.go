@@ -42,6 +42,13 @@ const (
 	// create time (Deps.FakeCustomerEnabled), same pattern as
 	// WhatsAppWebEnabled for whatsapp_web.
 	channelKeyFakeCustomer = "fakellm"
+	// channelKeyInstagram is the Instagram Direct channel
+	// (internal/adapter/channels/instagram). Like WhatsApp API and
+	// Messenger, both inbound and outbound are fully implemented — the
+	// identity entered at create time is the tenant's Instagram Business
+	// Account id (all-digits, same shape as WhatsApp's phone_number_id /
+	// Messenger's Page ID).
+	channelKeyInstagram = "instagram"
 )
 
 // channelTypes is the ordered, closed set of channel families the admin
@@ -58,7 +65,7 @@ var channelTypes = []channelType{
 	{Key: channelKeyWhatsAppWeb, Label: "WhatsApp Web"},
 	{Key: channelKeyMessenger, Label: "Messenger"},
 	{Key: "telegram", Label: "Telegram"},
-	{Key: "instagram", Label: "Instagram"},
+	{Key: channelKeyInstagram, Label: "Instagram"},
 	{Key: "webchat", Label: "Webchat"},
 	{Key: "email", Label: "E-mail"},
 	{Key: channelKeyFakeCustomer, Label: "Cliente Fake (Demo)"},
