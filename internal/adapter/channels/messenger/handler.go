@@ -25,12 +25,17 @@ import (
 const SignatureHeader = metashared.SignatureHeader
 
 // messengerEnvelope is the permissive subset of the Meta Messenger
-// webhook payload the handler consumes. Fields we do not need (echoes,
-// reactions, etc.) are intentionally absent so an upstream schema
+// webhook payload the handler consumes. Fields we do not need
+// (reactions, etc.) are intentionally absent so an upstream schema
 // change in those areas cannot break JSON parsing — encoding/json
 // ignores unknown fields by default. message_deliveries and
 // message_reads ARE modelled (envelMessage.Delivery / .Read — see
-// status_reconciler.go).
+// status_reconciler.go), and message echoes ARE modelled
+// (envelMsgBody.IsEcho) purely so deliverMessage can drop them —
+// an echo carries the same mid we just sent and sender.id equal to
+// our own page id, so treating it as an inbound customer message
+// would fabricate a bogus contact/conversation keyed by the page's
+// own id.
 type messengerEnvelope struct {
 	Object string       `json:"object"`
 	Entry  []envelEntry `json:"entry"`
@@ -63,6 +68,7 @@ type envelActor struct {
 type envelMsgBody struct {
 	MID         string               `json:"mid"`
 	Text        string               `json:"text"`
+	IsEcho      bool                 `json:"is_echo"`
 	Attachments []envelMsgAttachment `json:"attachments"`
 }
 
@@ -186,12 +192,23 @@ func (a *Adapter) deliverMessage(ctx context.Context, tenantID uuid.UUID, pageID
 	if mid == "" {
 		// message_deliveries/message_reads are intercepted before this
 		// function by deliverEntry's dispatch switch; anything else
-		// with an empty mid (echoes, reactions, etc.) drops silently at
+		// with an empty mid (reactions, etc.) drops silently at
 		// debug level so the warn-level signal stays meaningful for
 		// real bugs.
 		a.logger.Debug("messenger.missing_mid",
 			slog.String("tenant_id", tenantID.String()),
 			slog.String("page_id", pageID))
+		return
+	}
+	if m.Message.IsEcho {
+		// A message we sent ourselves, mirrored back by Meta. It carries
+		// the same mid as our outbound send and sender.id == our own
+		// page id — treating it as inbound would fabricate a contact
+		// keyed by the page's own id and a bogus conversation.
+		a.logger.Debug("messenger.echo_dropped",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("page_id", pageID),
+			slog.String("mid", mid))
 		return
 	}
 	psid := strings.TrimSpace(m.Sender.ID)
