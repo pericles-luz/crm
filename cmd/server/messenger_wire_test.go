@@ -20,10 +20,49 @@ func TestBuildMessengerOutboundEntry_DisabledWhenTokenMissing(t *testing.T) {
 	t.Parallel()
 	entry, ok := buildMessengerOutboundEntry(func(string) string { return "" }, nil, nil, nil)
 	if ok {
-		t.Fatalf("ok = true, want false when META_GRAPH_TOKEN is unset")
+		t.Fatalf("ok = true, want false when no graph token is set")
 	}
 	if entry != nil {
 		t.Fatalf("entry = %v, want nil when disabled", entry)
+	}
+}
+
+func TestMessengerOutboundGraphToken(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "both unset", env: map[string]string{}, want: ""},
+		{
+			name: "falls back to shared META_GRAPH_TOKEN",
+			env:  map[string]string{"META_GRAPH_TOKEN": "whatsapp-and-messenger-token"},
+			want: "whatsapp-and-messenger-token",
+		},
+		{
+			name: "dedicated override wins over the shared token",
+			env: map[string]string{
+				"META_GRAPH_TOKEN":           "shared-token",
+				"META_MESSENGER_GRAPH_TOKEN": "messenger-only-token",
+			},
+			want: "messenger-only-token",
+		},
+		{
+			name: "dedicated token alone (no shared token configured)",
+			env:  map[string]string{"META_MESSENGER_GRAPH_TOKEN": "messenger-only-token"},
+			want: "messenger-only-token",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(k string) string { return tc.env[k] }
+			if got := messengerOutboundGraphToken(getenv); got != tc.want {
+				t.Fatalf("messengerOutboundGraphToken = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

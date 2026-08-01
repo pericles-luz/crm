@@ -15,16 +15,22 @@ package main
 //   - Resolves per-tenant PageID via a reverse lookup against
 //     tenant_channel_associations with channel="messenger" (single-key pattern,
 //     same as WhatsApp uses for phone_number_id in the same table).
-//   - META_GRAPH_TOKEN is the system-user token (shared with WhatsApp sender).
+//   - Token: META_MESSENGER_GRAPH_TOKEN if set, else falls back to
+//     META_GRAPH_TOKEN (the WhatsApp system-user token). The two Meta
+//     products are commonly authorized under the same Business Manager
+//     system user (one token for both), but a Page can also live under a
+//     different Business Manager / system user than the WhatsApp Business
+//     Account — the dedicated override lets that Page's own token be used
+//     for Messenger sends without touching WhatsApp's.
 //   - Called exactly once, from inbox_wire_real.go's combined outbound
 //     Router — NOT from assembleMessengerAdapter (inbound never needed it).
 //     Building it twice would register the messenger_send_* Prometheus
 //     collectors twice and panic at boot, the same class of bug the
 //     WhatsApp outbound dispatcher hit (commit 258a78c).
 //
-// Both paths gate on META_APP_SECRET/META_GRAPH_TOKEN and DATABASE_URL;
-// any missing dep logs a "disabled" line and returns nil/false (fail-soft,
-// same as whatsapp_wire).
+// Both paths gate on META_APP_SECRET and DATABASE_URL; any missing dep
+// logs a "disabled" line and returns nil/false (fail-soft, same as
+// whatsapp_wire).
 
 import (
 	"context"
@@ -175,17 +181,17 @@ func assembleMessengerAdapter(ctx context.Context, cfg messenger.Config, pool *p
 // rate-limited) Messenger sender WITHOUT wrapping it in a Router, so
 // inbox_wire_real.go can merge it with the WhatsApp / fake-customer
 // entries into one combined Router built once per boot. ok=false means
-// Messenger outbound is disabled (no META_GRAPH_TOKEN / construction
-// error) — the caller should omit the entry from any combined route map.
+// Messenger outbound is disabled (no token / construction error) — the
+// caller should omit the entry from any combined route map.
 //
 // This is the ONLY construction site for channelmessenger.Sender — do not
 // also build one inside assembleMessengerAdapter (inbound doesn't need
 // it); see the file doc comment for why a second construction site
 // panics at boot.
 func buildMessengerOutboundEntry(getenv func(string) string, pool *pgxpool.Pool, rdb *goredis.Client, flag *messenger.EnvFeatureFlag) (inbox.OutboundChannel, bool) {
-	token := getenv("META_GRAPH_TOKEN")
+	token := messengerOutboundGraphToken(getenv)
 	if token == "" {
-		log.Printf("crm: messenger outbound sender disabled (META_GRAPH_TOKEN unset)")
+		log.Printf("crm: messenger outbound sender disabled (META_MESSENGER_GRAPH_TOKEN / META_GRAPH_TOKEN unset)")
 		return nil, false
 	}
 	lookup := channelmessenger.TenantConfigLookup(func(ctx context.Context, tenantID uuid.UUID) (channelmessenger.TenantConfig, error) {
@@ -213,6 +219,22 @@ func buildMessengerOutboundEntry(getenv func(string) string, pool *pgxpool.Pool,
 	oc = dispatch.NewRateLimited(oc, limiter, time.Minute, messengerOutboundRateMaxPerMin(getenv), nil)
 	oc = dispatch.NewIdempotent(oc, dispatch.NewMemoryLedger())
 	return oc, true
+}
+
+// envMessengerGraphToken optionally overrides META_GRAPH_TOKEN for
+// Messenger sends. Useful when the Facebook Page is authorized under a
+// different Business Manager / system user than the WhatsApp Business
+// Account (so a single META_GRAPH_TOKEN can't cover both products).
+const envMessengerGraphToken = "META_MESSENGER_GRAPH_TOKEN"
+
+// messengerOutboundGraphToken reads META_MESSENGER_GRAPH_TOKEN, falling
+// back to the shared META_GRAPH_TOKEN (the common case: one Business
+// Manager system user authorized for both WhatsApp and Messenger).
+func messengerOutboundGraphToken(getenv func(string) string) string {
+	if token := strings.TrimSpace(getenv(envMessengerGraphToken)); token != "" {
+		return token
+	}
+	return getenv("META_GRAPH_TOKEN")
 }
 
 // defaultMessengerRateMaxPerMin mirrors defaultOutboundRateMaxPerMin
