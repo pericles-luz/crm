@@ -90,6 +90,7 @@ func TestChannelBadge_AllSupportedChannelsRender(t *testing.T) {
 		{"whatsapp", "channel-badge-whatsapp", "WhatsApp"},
 		{"instagram", "channel-badge-instagram", "Instagram"},
 		{"facebook", "channel-badge-facebook", "Facebook"},
+		{"messenger", "channel-badge-messenger", "Messenger"},
 		{"chatbot", "channel-badge-chatbot", "Chatbot"},
 		{"", "channel-badge-unknown", "Canal desconhecido"},
 	}

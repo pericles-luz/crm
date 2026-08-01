@@ -470,6 +470,10 @@
   color: #1877f2; /* brand colour — Facebook blue */
 }
 
+.channel-badge--messenger {
+  color: #00b2ff; /* brand colour — Messenger blue */
+}
+
 .channel-badge--chatbot {
   color: var(--text-muted);
 }
