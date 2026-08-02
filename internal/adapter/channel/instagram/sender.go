@@ -1,16 +1,30 @@
-// Package instagram implements inbox.OutboundChannel against the Meta
-// Graph API send-message endpoint for the Instagram Direct channel.
+// Package instagram implements inbox.OutboundChannel against the
+// "Instagram API with Instagram Login" send-message endpoint for the
+// Instagram Direct channel.
 //
-// The endpoint is POST /v18.0/<ig_business_id>/messages. Like Messenger,
+// The endpoint is POST /v21.0/<ig_id>/messages on graph.instagram.com —
+// a distinct host and token family from Messenger/WhatsApp's
+// graph.facebook.com. This API generation authenticates with an
+// Instagram User access token obtained via Instagram's own OAuth
+// ("Business Login for Instagram": authorize at instagram.com/oauth/authorize,
+// exchange at api.instagram.com/oauth/access_token, then upgrade to a
+// 60-day long-lived token at graph.instagram.com/access_token) rather
+// than a Business Manager System User / Page Access Token. This
+// generation does NOT require the Instagram professional account to be
+// linked to a Facebook Page — the account is addressed directly by its
+// own numeric id.
+//
+// The request/response payload shape is otherwise identical to
+// Messenger's Graph API: recipient.id + message.text (or attachment),
+// Bearer auth header, {"message_id": "..."} on success. Like Messenger,
 // the recipient is a scoped user id (IGSID) and there are no HSM
 // templates — every send is freeform. Meta enforces the 24h
 // customer-care window server-side and rejects an out-of-window
 // freeform send with a 4xx; we surface that as ErrChannelRejected
-// (retries won't help) — the same posture the Messenger sender takes
-// for its structurally identical window, deliberately without a
-// client-side pre-check: Meta's policy exceptions (human-agent tag,
-// post-purchase tags) evolve faster than a local approximation could
-// track, so the server stays the single source of truth.
+// (retries won't help) — deliberately without a client-side pre-check:
+// Meta's policy exceptions (human-agent tag, post-purchase tags) evolve
+// faster than a local approximation could track, so the server stays
+// the single source of truth.
 //
 // Two message types are supported:
 //
@@ -42,8 +56,10 @@ import (
 	"github.com/pericles-luz/crm/internal/inbox"
 )
 
-// DefaultBaseURL is the Meta Graph base URL targeted in production.
-const DefaultBaseURL = "https://graph.facebook.com/v18.0"
+// DefaultBaseURL is the "Instagram API with Instagram Login" base URL
+// targeted in production — a distinct host from Messenger/WhatsApp's
+// graph.facebook.com (see package doc comment).
+const DefaultBaseURL = "https://graph.instagram.com/v21.0"
 
 // DefaultTimeout caps each HTTP attempt.
 const DefaultTimeout = 10 * time.Second

@@ -34,22 +34,19 @@ func TestInstagramOutboundGraphToken(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
-		{name: "both unset", env: map[string]string{}, want: ""},
+		{name: "unset", env: map[string]string{}, want: ""},
 		{
-			name: "falls back to shared META_GRAPH_TOKEN",
-			env:  map[string]string{"META_GRAPH_TOKEN": "whatsapp-and-instagram-token"},
-			want: "whatsapp-and-instagram-token",
+			// No fallback to META_GRAPH_TOKEN: that's a Business Manager
+			// System User / Page Access Token (graph.facebook.com), a
+			// different auth family from the Instagram User access token
+			// this sender needs (graph.instagram.com) — see the const's
+			// doc comment.
+			name: "shared META_GRAPH_TOKEN is NOT used as a fallback",
+			env:  map[string]string{"META_GRAPH_TOKEN": "whatsapp-token"},
+			want: "",
 		},
 		{
-			name: "dedicated override wins over the shared token",
-			env: map[string]string{
-				"META_GRAPH_TOKEN":           "shared-token",
-				"META_INSTAGRAM_GRAPH_TOKEN": "instagram-only-token",
-			},
-			want: "instagram-only-token",
-		},
-		{
-			name: "dedicated token alone (no shared token configured)",
+			name: "dedicated token",
 			env:  map[string]string{"META_INSTAGRAM_GRAPH_TOKEN": "instagram-only-token"},
 			want: "instagram-only-token",
 		},

@@ -45,7 +45,7 @@ import (
 func buildInstagramOutboundEntry(getenv func(string) string, pool *pgxpool.Pool, rdb *goredis.Client, flag *instagram.EnvFeatureFlag) (inbox.OutboundChannel, bool) {
 	token := instagramOutboundGraphToken(getenv)
 	if token == "" {
-		log.Printf("crm: instagram outbound sender disabled (META_INSTAGRAM_GRAPH_TOKEN / META_GRAPH_TOKEN unset)")
+		log.Printf("crm: instagram outbound sender disabled (META_INSTAGRAM_GRAPH_TOKEN unset)")
 		return nil, false
 	}
 	lookup := channelinstagram.TenantConfigLookup(func(ctx context.Context, tenantID uuid.UUID) (channelinstagram.TenantConfig, error) {
@@ -75,19 +75,21 @@ func buildInstagramOutboundEntry(getenv func(string) string, pool *pgxpool.Pool,
 	return oc, true
 }
 
-// envInstagramGraphToken optionally overrides META_GRAPH_TOKEN for
-// Instagram sends, mirroring envMessengerGraphToken's rationale: the
-// Instagram professional account can be authorized under a different
-// Business Manager / system user than WhatsApp.
+// envInstagramGraphToken holds the Instagram User access token obtained
+// via Business Login for Instagram (instagram.com/oauth/authorize →
+// api.instagram.com/oauth/access_token → the 60-day long-lived
+// exchange at graph.instagram.com/access_token — see
+// internal/adapter/channel/instagram/sender.go's package doc comment).
+// Unlike Messenger/WhatsApp, this is NOT a Business Manager System
+// User / Page Access Token and there is deliberately no fallback to
+// the shared META_GRAPH_TOKEN — that token belongs to a different auth
+// family (graph.facebook.com) and does not work against
+// graph.instagram.com.
 const envInstagramGraphToken = "META_INSTAGRAM_GRAPH_TOKEN"
 
-// instagramOutboundGraphToken reads META_INSTAGRAM_GRAPH_TOKEN, falling
-// back to the shared META_GRAPH_TOKEN.
+// instagramOutboundGraphToken reads META_INSTAGRAM_GRAPH_TOKEN.
 func instagramOutboundGraphToken(getenv func(string) string) string {
-	if token := strings.TrimSpace(getenv(envInstagramGraphToken)); token != "" {
-		return token
-	}
-	return getenv("META_GRAPH_TOKEN")
+	return strings.TrimSpace(getenv(envInstagramGraphToken))
 }
 
 // defaultInstagramRateMaxPerMin mirrors defaultMessengerRateMaxPerMin
