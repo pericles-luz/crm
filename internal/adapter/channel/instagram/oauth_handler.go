@@ -22,18 +22,29 @@ type OAuthTokenSaver interface {
 	Save(ctx context.Context, tenantID uuid.UUID, accessToken, tokenType string, expiresAt time.Time) error
 }
 
+// IGBusinessIDLookup resolves a tenant's Instagram Business Account id
+// (the identity entered at /settings/channels create time, stored in
+// tenant_channel_associations) — needed after a successful token
+// exchange to call SubscribeApp. Returns "" with a nil error when the
+// tenant has no association yet.
+type IGBusinessIDLookup interface {
+	IGBusinessID(ctx context.Context, tenantID uuid.UUID) (string, error)
+}
+
 // OAuthCallbackHandler exchanges the authorization code for a long-lived
-// token and stores it. Implements http.Handler.
+// token, stores it, and subscribes the account to this app's webhook.
+// Implements http.Handler.
 type OAuthCallbackHandler struct {
 	cfg         OAuthConfig
 	stateSecret []byte
 	store       OAuthTokenSaver
+	igLookup    IGBusinessIDLookup
 }
 
-// NewOAuthCallbackHandler builds an OAuthCallbackHandler. cfg, stateSecret,
-// and store are all required.
-func NewOAuthCallbackHandler(cfg OAuthConfig, stateSecret []byte, store OAuthTokenSaver) *OAuthCallbackHandler {
-	return &OAuthCallbackHandler{cfg: cfg, stateSecret: stateSecret, store: store}
+// NewOAuthCallbackHandler builds an OAuthCallbackHandler. All arguments
+// are required.
+func NewOAuthCallbackHandler(cfg OAuthConfig, stateSecret []byte, store OAuthTokenSaver, igLookup IGBusinessIDLookup) *OAuthCallbackHandler {
+	return &OAuthCallbackHandler{cfg: cfg, stateSecret: stateSecret, store: store, igLookup: igLookup}
 }
 
 // settingsChannelsPath is the operator-facing landing page this handler
@@ -87,6 +98,17 @@ func (h *OAuthCallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		log.Printf("crm: instagram oauth callback — token save failed for tenant %s: %v", tenantID, err)
 		http.Redirect(w, r, landingBase+"?instagram=error", http.StatusFound)
 		return
+	}
+
+	// Subscribing the account to this app's webhook is best-effort here:
+	// the token already saved above is enough for outbound sending to
+	// work, so a subscribe failure degrades (no inbound delivery until a
+	// retry) rather than bouncing an otherwise-successful connect.
+	igBusinessID, err := h.igLookup.IGBusinessID(r.Context(), tenantID)
+	if err != nil || igBusinessID == "" {
+		log.Printf("crm: instagram oauth callback — tenant %s connected but ig_business_id not found, cannot subscribe app for inbound webhooks: %v", tenantID, err)
+	} else if err := h.cfg.SubscribeApp(r.Context(), igBusinessID, accessToken); err != nil {
+		log.Printf("crm: instagram oauth callback — subscribe app failed for tenant %s: %v", tenantID, err)
 	}
 
 	log.Printf("crm: instagram oauth callback — tenant %s connected", tenantID)
