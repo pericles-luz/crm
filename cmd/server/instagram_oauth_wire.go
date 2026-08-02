@@ -57,8 +57,9 @@ func buildInstagramOAuthWiring(ctx context.Context, getenv func(string) string) 
 		return nil
 	}
 	store := pgstore.NewInstagramOAuthTokenStore(pool)
+	igLookup := pgstore.NewInstagramIGBusinessIDLookup(pool)
 	cfg := channelinstagram.OAuthConfig{AppID: appID, AppSecret: appSecret}
-	handler := channelinstagram.NewOAuthCallbackHandler(cfg, []byte(appSecret), store)
+	handler := channelinstagram.NewOAuthCallbackHandler(cfg, []byte(appSecret), store, igLookup)
 
 	register := func(mux *http.ServeMux) {
 		mux.Handle("GET "+channelinstagram.OAuthCallbackPath, handler)

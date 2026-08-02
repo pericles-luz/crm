@@ -2,6 +2,7 @@ package instagram_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -138,4 +139,64 @@ func TestOAuthConfig_ExchangeLongLivedToken_MissingFields(t *testing.T) {
 	if _, _, err := cfg.ExchangeLongLivedToken(context.Background(), "tok"); err == nil {
 		t.Fatal("expected error for missing access_token/expires_in")
 	}
+}
+
+func TestOAuthConfig_SubscribeApp_Success(t *testing.T) {
+	t.Parallel()
+	var gotPath, gotFields, gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotFields = r.URL.Query().Get("subscribed_fields")
+		gotToken = r.URL.Query().Get("access_token")
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := instagram.OAuthConfig{AppID: "a", AppSecret: "s", HTTPClient: srv.Client(), SubscribedAppsBaseURL: srv.URL}
+	if err := cfg.SubscribeApp(context.Background(), "ig123", "tok-abc"); err != nil {
+		t.Fatalf("SubscribeApp: %v", err)
+	}
+	if gotPath != "/ig123/subscribed_apps" {
+		t.Errorf("path = %q, want /ig123/subscribed_apps", gotPath)
+	}
+	if gotFields != "messages" {
+		t.Errorf("subscribed_fields = %q, want messages", gotFields)
+	}
+	if gotToken != "tok-abc" {
+		t.Errorf("access_token = %q", gotToken)
+	}
+}
+
+func TestOAuthConfig_SubscribeApp_NonOKStatus(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error_message":"insufficient permission"}`))
+	}))
+	defer srv.Close()
+
+	cfg := instagram.OAuthConfig{AppID: "a", AppSecret: "s", HTTPClient: srv.Client(), SubscribedAppsBaseURL: srv.URL}
+	err := cfg.SubscribeApp(context.Background(), "ig123", "tok-abc")
+	if err == nil || !strings.Contains(err.Error(), "insufficient permission") {
+		t.Fatalf("expected wrapped error containing response body, got %v", err)
+	}
+	if !errors.Is(err, instagram.ErrSubscribeAppFailed) {
+		t.Fatalf("expected errors.Is(err, ErrSubscribeAppFailed), got %v", err)
+	}
+}
+
+func TestOAuthConfig_SubscribeApp_DefaultsToDefaultBaseURL(t *testing.T) {
+	t.Parallel()
+	cfg := instagram.OAuthConfig{AppID: "a", AppSecret: "s"}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	// No SubscribedAppsBaseURL override: this hits the real
+	// graph.instagram.com host, which will fail fast under the 1ms
+	// deadline — the point is only to confirm no panic/nil deref when
+	// the override is unset, mirroring the shortLivedURL/longLivedURL
+	// default-fallback tests' spirit without a live network dependency.
+	_ = cfg.SubscribeApp(ctx, "ig123", "tok")
 }

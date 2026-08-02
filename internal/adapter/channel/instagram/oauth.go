@@ -44,6 +44,10 @@ const defaultOAuthScope = "instagram_business_basic,instagram_business_manage_me
 // Instagram's token-exchange endpoints.
 var ErrOAuthExchangeFailed = errors.New("instagram: oauth token exchange failed")
 
+// ErrSubscribeAppFailed wraps any non-2xx response from the
+// subscribed_apps call SubscribeApp makes.
+var ErrSubscribeAppFailed = errors.New("instagram: subscribe app failed")
+
 // OAuthConfig holds the Meta App credentials needed to run Business
 // Login for Instagram.
 type OAuthConfig struct {
@@ -52,11 +56,13 @@ type OAuthConfig struct {
 	Scope      string       // defaults to defaultOAuthScope when empty
 	HTTPClient *http.Client // defaults to a client with DefaultTimeout when nil
 
-	// ShortLivedTokenURL / LongLivedTokenURL override the real Meta
-	// endpoints. Tests point these at an httptest.Server; production
-	// code leaves them empty to use shortLivedTokenURL/longLivedTokenURL.
-	ShortLivedTokenURL string
-	LongLivedTokenURL  string
+	// ShortLivedTokenURL / LongLivedTokenURL / SubscribedAppsBaseURL
+	// override the real Meta endpoints. Tests point these at an
+	// httptest.Server; production code leaves them empty to use
+	// shortLivedTokenURL/longLivedTokenURL/DefaultBaseURL.
+	ShortLivedTokenURL    string
+	LongLivedTokenURL     string
+	SubscribedAppsBaseURL string
 }
 
 func (c OAuthConfig) httpClient() *http.Client {
@@ -181,6 +187,45 @@ func (c OAuthConfig) ExchangeLongLivedToken(ctx context.Context, shortLivedToken
 		return "", 0, fmt.Errorf("%w: response missing access_token/expires_in", ErrOAuthExchangeFailed)
 	}
 	return parsed.AccessToken, time.Duration(parsed.ExpiresIn) * time.Second, nil
+}
+
+// SubscribeApp subscribes the tenant's Instagram professional account to
+// this app's webhook for the "messages" field
+// (POST /{ig-id}/subscribed_apps?subscribed_fields=messages, using the
+// account's own access token as bearer auth). Meta requires this
+// per-account opt-in independently of the App Dashboard's Webhooks
+// product config: without it, a newly-connected account's inbound
+// events are never delivered, even with a valid access token and a
+// correctly configured app-level webhook.
+func (c OAuthConfig) SubscribeApp(ctx context.Context, igBusinessID, accessToken string) error {
+	base := c.SubscribedAppsBaseURL
+	if base == "" {
+		base = DefaultBaseURL
+	}
+	v := url.Values{}
+	v.Set("subscribed_fields", "messages")
+	v.Set("access_token", accessToken)
+	target := strings.TrimRight(base, "/") + "/" + igBusinessID + "/subscribed_apps?" + v.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
+	if err != nil {
+		return fmt.Errorf("instagram: build subscribe-app request: %w", err)
+	}
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrSubscribeAppFailed, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return fmt.Errorf("%w: read response: %v", ErrSubscribeAppFailed, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%w: status %d: %s", ErrSubscribeAppFailed, resp.StatusCode, truncateBody(body))
+	}
+	return nil
 }
 
 func truncateBody(b []byte) string {
