@@ -20,7 +20,12 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
+
+	channelinstagram "github.com/pericles-luz/crm/internal/adapter/channel/instagram"
+	"github.com/pericles-luz/crm/internal/adapter/channels/instagram"
 	pgpool "github.com/pericles-luz/crm/internal/adapter/db/postgres"
 	pgchannels "github.com/pericles-luz/crm/internal/adapter/db/postgres/channels"
 	pginbox "github.com/pericles-luz/crm/internal/adapter/db/postgres/inbox"
@@ -78,7 +83,13 @@ func buildWebChannelsHandler(ctx context.Context, getenv func(string) string) (h
 	// the tenant. Mirrors the NewChannelAssociationLookup wiring on the read
 	// side.
 	associations := pgstore.NewChannelAssociationWriter(pool)
-	handler, err := assembleWebChannelsHandlerWithDeps(store, userDir, slog.Default(), whatsappWebEnabled(getenv), fakeCustomerChannelEnabled(getenv), associations, auditor)
+	// "Conectar Instagram" (Business Login for Instagram self-service):
+	// wired only when the same two env vars buildInstagramOAuthWiring
+	// requires are set — otherwise the button stays hidden rather than
+	// offering a dead-end link (the callback route wouldn't be mounted
+	// either). Reuses this handler's own pool for the Status() lookup.
+	instagramOAuth := buildInstagramConnector(pool, getenv)
+	handler, err := assembleWebChannelsHandlerWithDeps(store, userDir, slog.Default(), whatsappWebEnabled(getenv), fakeCustomerChannelEnabled(getenv), associations, instagramOAuth, auditor)
 	if err != nil {
 		pool.Close()
 		log.Printf("crm: web/channels disabled — assemble: %v", err)
@@ -106,6 +117,55 @@ type channelsStore interface {
 func assembleWebChannelsHandler(store channelsStore, userLabels userlabel.Directory, logger *slog.Logger, auditor ...webchannels.AccessAuditor) (http.Handler, error) {
 	return assembleWebChannelsHandlerFlagged(store, userLabels, logger, false, auditor...)
 }
+
+// buildInstagramConnector wires the "Conectar Instagram" self-service
+// glue when Business Login for Instagram is configured (the same
+// META_INSTAGRAM_APP_ID + META_APP_SECRET precondition
+// buildInstagramOAuthWiring checks) — nil otherwise, hiding the button.
+func buildInstagramConnector(pool instagramConnectorPool, getenv func(string) string) webchannels.InstagramConnector {
+	appID := strings.TrimSpace(getenv(envInstagramAppID))
+	appSecret := strings.TrimSpace(getenv(instagram.EnvAppSecret))
+	if appID == "" || appSecret == "" {
+		return nil
+	}
+	return &instagramConnectorGlue{
+		cfg:         channelinstagram.OAuthConfig{AppID: appID, AppSecret: appSecret},
+		stateSecret: []byte(appSecret),
+		store:       pgstore.NewInstagramOAuthTokenStore(pool),
+	}
+}
+
+// instagramConnectorPool is the narrow pgstore.PgxConn surface
+// buildInstagramConnector needs — declared locally so tests can pass a
+// stub without importing pgx.
+type instagramConnectorPool = pgstore.PgxConn
+
+// instagramConnectorGlue implements webchannels.InstagramConnector by
+// composing the OAuth mechanics (state signing + authorize URL) with the
+// token store's Status lookup. Pure composition-root glue: no logic here
+// beyond what each collaborator already owns.
+type instagramConnectorGlue struct {
+	cfg         channelinstagram.OAuthConfig
+	stateSecret []byte
+	store       *pgstore.InstagramOAuthTokenStore
+}
+
+func (g *instagramConnectorGlue) AuthorizeURL(tenantID uuid.UUID, redirectURI string) (string, error) {
+	state, err := channelinstagram.SignOAuthState(g.stateSecret, tenantID, 10*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("sign instagram oauth state: %w", err)
+	}
+	return g.cfg.AuthorizeURL(redirectURI, state), nil
+}
+
+func (g *instagramConnectorGlue) Status(ctx context.Context, tenantID uuid.UUID) (bool, time.Time, error) {
+	_, expiresAt, ok, err := g.store.Get(ctx, tenantID)
+	return ok, expiresAt, err
+}
+
+// Compile-time assertion that instagramConnectorGlue satisfies the web
+// handler's InstagramConnector port.
+var _ webchannels.InstagramConnector = (*instagramConnectorGlue)(nil)
 
 // EnvWhatsAppWebEnabled gates the "WhatsApp Web" (unofficial QR-session)
 // channel type. Default OFF; set to "1" to offer + accept the type in a
@@ -139,15 +199,17 @@ func fakeCustomerChannelEnabled(getenv func(string) string) bool {
 // WhatsApp-API onboarding skipped) and fake-customer readiness off, keeping
 // the pre-SIN-67143 call sites source-compatible.
 func assembleWebChannelsHandlerFlagged(store channelsStore, userLabels userlabel.Directory, logger *slog.Logger, wsWebEnabled bool, auditor ...webchannels.AccessAuditor) (http.Handler, error) {
-	return assembleWebChannelsHandlerWithDeps(store, userLabels, logger, wsWebEnabled, false, nil, auditor...)
+	return assembleWebChannelsHandlerWithDeps(store, userLabels, logger, wsWebEnabled, false, nil, nil, auditor...)
 }
 
 // assembleWebChannelsHandlerWithDeps is the deepest assembly seam. It adds
-// the optional WhatsApp-API association writer (SIN-67143) and the
-// fake-customer channel readiness flag on top of the flag-aware seam; a nil
-// writer disables WhatsApp-API onboarding so the surface still renders +
-// creates channels under fail-soft wiring.
-func assembleWebChannelsHandlerWithDeps(store channelsStore, userLabels userlabel.Directory, logger *slog.Logger, wsWebEnabled bool, fakeCustomerEnabled bool, associations webchannels.ChannelAssociationWriter, auditor ...webchannels.AccessAuditor) (http.Handler, error) {
+// the optional WhatsApp-API association writer (SIN-67143), the
+// fake-customer channel readiness flag, and the optional "Conectar
+// Instagram" connector on top of the flag-aware seam; a nil writer
+// disables WhatsApp-API onboarding and a nil connector hides the
+// Instagram button, so the surface still renders + creates channels
+// under fail-soft wiring either way.
+func assembleWebChannelsHandlerWithDeps(store channelsStore, userLabels userlabel.Directory, logger *slog.Logger, wsWebEnabled bool, fakeCustomerEnabled bool, associations webchannels.ChannelAssociationWriter, instagramOAuth webchannels.InstagramConnector, auditor ...webchannels.AccessAuditor) (http.Handler, error) {
 	if store == nil {
 		return nil, errors.New("channels_wire: store is nil")
 	}
@@ -169,6 +231,7 @@ func assembleWebChannelsHandlerWithDeps(store channelsStore, userLabels userlabe
 		WhatsAppWebEnabled:  wsWebEnabled,
 		FakeCustomerEnabled: fakeCustomerEnabled,
 		Associations:        associations,
+		InstagramOAuth:      instagramOAuth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("channels_wire: build handler: %w", err)

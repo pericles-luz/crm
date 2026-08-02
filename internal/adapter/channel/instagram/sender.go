@@ -87,6 +87,13 @@ type TenantConfig struct {
 	// Enabled is the per-tenant feature flag (feature.instagram.enabled).
 	// When false the sender returns ErrChannelDisabled without an HTTP call.
 	Enabled bool
+	// AccessToken is the tenant's own Instagram User access token,
+	// obtained via Business Login for Instagram (see oauth.go) and
+	// resolved per-send. Empty falls back to the Sender's
+	// constructor-level token (the legacy single global
+	// META_INSTAGRAM_GRAPH_TOKEN); if both are empty the send fails with
+	// ErrChannelAuthFailed.
+	AccessToken string
 }
 
 // TenantConfigLookup resolves a tenant ID to its sender config.
@@ -144,11 +151,10 @@ func WithBackoffBase(d time.Duration) Option {
 	}
 }
 
-// New constructs a Sender. token, config, and reg are required.
+// New constructs a Sender. config and reg are required; token is the
+// legacy global fallback and MAY be empty when every tenant is expected
+// to supply its own TenantConfig.AccessToken instead (see TenantConfig).
 func New(token string, config TenantConfigLookup, reg prometheus.Registerer, opts ...Option) (*Sender, error) {
-	if token == "" {
-		return nil, errors.New("instagram: META_INSTAGRAM_GRAPH_TOKEN must not be empty")
-	}
 	if config == nil {
 		return nil, errors.New("instagram: tenant config lookup must not be nil")
 	}
@@ -192,6 +198,14 @@ func (s *Sender) SendMessage(ctx context.Context, m inbox.OutboundMessage) (stri
 		outcome = outcomeAuth
 		return "", fmt.Errorf("%w: tenant ig_business_id missing", inbox.ErrChannelAuthFailed)
 	}
+	token := cfg.AccessToken
+	if token == "" {
+		token = s.token
+	}
+	if token == "" {
+		outcome = outcomeAuth
+		return "", fmt.Errorf("%w: no tenant access token and no global fallback token configured", inbox.ErrChannelAuthFailed)
+	}
 
 	payload, err := encodePayload(m)
 	if err != nil {
@@ -212,7 +226,7 @@ func (s *Sender) SendMessage(ctx context.Context, m inbox.OutboundMessage) (stri
 			case <-time.After(delay):
 			}
 		}
-		mid, sendErr := s.doRequest(ctx, url, payload)
+		mid, sendErr := s.doRequest(ctx, url, token, payload)
 		if sendErr == nil {
 			outcome = outcomeSuccess
 			return mid, nil
@@ -233,14 +247,15 @@ func (s *Sender) SendMessage(ctx context.Context, m inbox.OutboundMessage) (stri
 }
 
 // doRequest performs a single Graph call and maps the HTTP outcome to an
-// inbox.* sentinel.
-func (s *Sender) doRequest(ctx context.Context, url string, body []byte) (string, error) {
+// inbox.* sentinel. token is the already-resolved per-send bearer token
+// (tenant AccessToken, falling back to the Sender's global token).
+func (s *Sender) doRequest(ctx context.Context, url, token string, body []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("%w: build request: %v", inbox.ErrChannelTransient, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

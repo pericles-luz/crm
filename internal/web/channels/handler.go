@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	channelinstagram "github.com/pericles-luz/crm/internal/adapter/channel/instagram"
 	"github.com/pericles-luz/crm/internal/branding"
 	"github.com/pericles-luz/crm/internal/channels"
 	"github.com/pericles-luz/crm/internal/http/middleware/csp"
@@ -63,6 +65,16 @@ type ChannelAssociationWriter interface {
 	SaveAssociation(ctx context.Context, tenantID uuid.UUID, channel, association string) error
 }
 
+// InstagramConnector drives the "Conectar Instagram" self-service
+// Business Login flow: AuthorizeURL builds the redirect for a given
+// tenant + already-computed redirectURI (signing the OAuth `state`
+// internally), and Status reports whether the tenant already has a
+// stored token (for the row's "Conectado" badge).
+type InstagramConnector interface {
+	AuthorizeURL(tenantID uuid.UUID, redirectURI string) (string, error)
+	Status(ctx context.Context, tenantID uuid.UUID) (connected bool, expiresAt time.Time, err error)
+}
+
 // Deps bundles the handler collaborators. Channels + Access are required;
 // the rest default (Logger → slog.Default) or degrade gracefully
 // (CSRFToken / UserID / UserLabels nil → shell fallbacks).
@@ -106,6 +118,11 @@ type Deps struct {
 	// the association upsert are skipped, so the surface renders + creates
 	// channels under fail-soft wiring. Production always provides it.
 	Associations ChannelAssociationWriter
+	// InstagramOAuth drives the "Conectar Instagram" Business Login
+	// self-service flow. Optional (nil ⇒ skip): a nil connector hides
+	// the button entirely (Business Login not configured in this
+	// environment — same fail-soft posture as WhatsAppWebEnabled).
+	InstagramOAuth InstagramConnector
 }
 
 // Handler serves the SIN-66391 channel-management admin surface.
@@ -159,6 +176,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+BasePath+"/{id}/edit", h.editForm)
 	mux.HandleFunc("POST "+BasePath+"/{id}", h.update)
 	mux.HandleFunc("POST "+BasePath+"/{id}/active", h.toggle)
+	mux.HandleFunc("GET "+BasePath+"/{id}/connect-instagram", h.connectInstagram)
 }
 
 // page renders the full registry inside the app shell.
@@ -172,7 +190,57 @@ func (h *Handler) page(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, "load channels", err)
 		return
 	}
-	h.render(w, pageTmpl, h.newPageData(r, tenant, rows))
+	data := h.newPageData(r, tenant, rows)
+	switch r.URL.Query().Get("instagram") {
+	case "connected":
+		data.Toast = toastData{Message: "Instagram conectado com sucesso."}
+	case "error":
+		data.Toast = toastData{Message: "Não foi possível conectar o Instagram. Tente novamente."}
+	}
+	h.render(w, pageTmpl, data)
+}
+
+// connectInstagram redirects the operator's browser to Instagram's
+// Business Login authorize screen for this channel's tenant. The
+// callback (cmd/server/instagram_oauth_wire.go, mounted at
+// channelinstagram.OAuthCallbackPath) redirects back to this same host's
+// /settings/channels?instagram=connected|error — see page().
+func (h *Handler) connectInstagram(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := h.tenant(w, r)
+	if !ok {
+		return
+	}
+	ch, ok := h.getChannel(w, r, tenant.ID)
+	if !ok {
+		return
+	}
+	if ch.ChannelKey != channelKeyInstagram || h.deps.InstagramOAuth == nil {
+		http.NotFound(w, r)
+		return
+	}
+	redirectURI := requestBaseURL(r) + channelinstagram.OAuthCallbackPath
+	url, err := h.deps.InstagramOAuth.AuthorizeURL(tenant.ID, redirectURI)
+	if err != nil {
+		h.fail(w, "build instagram authorize url", err)
+		return
+	}
+	http.Redirect(w, r, url, http.StatusFound)
+}
+
+// requestBaseURL mirrors internal/slugreservation/redirect_handler.go's
+// scheme-detection idiom, reconstructing this request's own
+// scheme://host so the redirect_uri sent to Instagram matches exactly
+// what the OAuth callback rebuilds on the way back (Instagram rejects a
+// mismatched redirect_uri at code-exchange time).
+func requestBaseURL(r *http.Request) string {
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
+		scheme = "http"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "https" || proto == "http" {
+		scheme = proto
+	}
+	return scheme + "://" + r.Host
 }
 
 // newForm returns the create modal with an all-checked roster (new-channel
@@ -468,7 +536,7 @@ func (h *Handler) loadRows(ctx context.Context, tenantID uuid.UUID) ([]channelRo
 		if err != nil {
 			return nil, err
 		}
-		rows = append(rows, rowFromChannel(ch, len(grantIDs), total))
+		rows = append(rows, h.rowFromChannel(ctx, ch, len(grantIDs), total))
 	}
 	return rows, nil
 }
@@ -483,12 +551,17 @@ func (h *Handler) rowFor(ctx context.Context, tenantID uuid.UUID, ch *channels.C
 	if err != nil {
 		return channelRow{}, err
 	}
-	return rowFromChannel(ch, len(grantIDs), total), nil
+	return h.rowFromChannel(ctx, ch, len(grantIDs), total), nil
 }
 
-func rowFromChannel(ch *channels.Channel, grantCount, rosterTotal int) channelRow {
+// rowFromChannel builds a channelRow, including the Instagram-only
+// "Conectar Instagram" affordance: ShowInstagramConnect is set for an
+// Instagram-typed channel whenever h.deps.InstagramOAuth is wired, and
+// InstagramConnected is a best-effort Status() lookup (a failure just
+// renders "Conectar" instead of failing the whole row list).
+func (h *Handler) rowFromChannel(ctx context.Context, ch *channels.Channel, grantCount, rosterTotal int) channelRow {
 	summary, all := accessSummary(grantCount, rosterTotal)
-	return channelRow{
+	row := channelRow{
 		ID:             ch.ID.String(),
 		Name:           ch.DisplayName,
 		TypeLabel:      typeLabel(ch.ChannelKey),
@@ -498,6 +571,13 @@ func rowFromChannel(ch *channels.Channel, grantCount, rosterTotal int) channelRo
 		AccessAll:      all,
 		Restricted:     ch.Restricted,
 	}
+	if ch.ChannelKey == channelKeyInstagram && h.deps.InstagramOAuth != nil {
+		row.ShowInstagramConnect = true
+		if connected, _, err := h.deps.InstagramOAuth.Status(ctx, ch.TenantID); err == nil {
+			row.InstagramConnected = connected
+		}
+	}
+	return row
 }
 
 func (h *Handler) rosterTotal(ctx context.Context, tenantID uuid.UUID) (int, error) {
