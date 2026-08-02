@@ -44,6 +44,9 @@ const partialDefs = `
   <td class="channels-row__actions">
     <button type="button" class="btn btn--ghost" hx-get="/settings/channels/{{.ID}}/edit" hx-target="#channels-modal" hx-swap="innerHTML">Editar</button>
     <button type="button" class="btn btn--ghost" hx-post="/settings/channels/{{.ID}}/active" hx-target="#channel-row-{{.ID}}" hx-swap="outerHTML">{{if .Active}}Desativar{{else}}Ativar{{end}}</button>
+    {{- if .ShowInstagramConnect}}
+    {{- if .InstagramConnected}}<span class="badge badge--success">Conectado</span>{{else}}<a class="btn btn--ghost" href="/settings/channels/{{.ID}}/connect-instagram">Conectar Instagram</a>{{end}}
+    {{- end}}
   </td>
 </tr>
 {{end}}
@@ -183,7 +186,7 @@ var pageTmpl = func() *template.Template {
       <h1 class="channels-page__title">Canais</h1>
       <a class="btn btn--primary" href="/settings/channels/new" hx-get="/settings/channels/new" hx-target="#channels-modal" hx-swap="innerHTML">+ Novo canal</a>
     </div>
-    <div id="channels-toast" class="channels-toast" aria-live="polite"></div>
+    <div id="channels-toast" class="channels-toast" aria-live="polite">{{if .Toast.Message}}{{template "channels.toast" .Toast}}{{end}}</div>
     <div id="channels-list" class="card channels-card">{{template "channels.listBody" .}}</div>
     <div id="channels-modal"></div>
   </div>

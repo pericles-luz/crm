@@ -36,7 +36,6 @@ func TestNew_Validation(t *testing.T) {
 		reg     prometheus.Registerer
 		wantErr string
 	}{
-		{"empty token", "", lookup, prometheus.NewRegistry(), "META_INSTAGRAM_GRAPH_TOKEN"},
 		{"nil lookup", "tok", nil, prometheus.NewRegistry(), "tenant config lookup"},
 		{"nil registerer", "tok", lookup, nil, "prometheus registerer"},
 	}
@@ -52,6 +51,18 @@ func TestNew_Validation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", tc.wantErr, err.Error())
 			}
 		})
+	}
+}
+
+// TestNew_EmptyTokenAllowed pins that an empty constructor-level token is
+// now valid construction: per-tenant TenantConfig.AccessToken (obtained
+// via Business Login for Instagram, see oauth.go) can be the only token
+// source once a tenant has connected — see
+// TestSendMessage_PerTenantAccessToken_NoGlobalFallback.
+func TestNew_EmptyTokenAllowed(t *testing.T) {
+	t.Parallel()
+	if _, err := instagram.New("", stubLookup(instagram.TenantConfig{IGBusinessID: "ig", Enabled: true}), prometheus.NewRegistry()); err != nil {
+		t.Fatalf("expected empty global token to be a valid construction, got %v", err)
 	}
 }
 
@@ -84,6 +95,71 @@ func TestSendMessage_MissingIGBusinessID_AuthFailed(t *testing.T) {
 	_, err := s.SendMessage(context.Background(), outMsg("hi"))
 	if !errors.Is(err, inbox.ErrChannelAuthFailed) {
 		t.Fatalf("expected ErrChannelAuthFailed, got %v", err)
+	}
+}
+
+func TestSendMessage_PerTenantAccessToken_NoGlobalFallback(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"message_id":"m_tenant_tok"}`))
+	}))
+	defer srv.Close()
+
+	s := mustSender(t, "", stubLookup(instagram.TenantConfig{IGBusinessID: "ig", Enabled: true, AccessToken: "tenant-own-token"}),
+		instagram.WithBaseURL(srv.URL))
+	mid, err := s.SendMessage(context.Background(), outMsg("hi"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mid != "m_tenant_tok" {
+		t.Errorf("expected m_tenant_tok, got %q", mid)
+	}
+	if gotAuth != "Bearer tenant-own-token" {
+		t.Errorf("expected Bearer tenant-own-token, got %q", gotAuth)
+	}
+}
+
+func TestSendMessage_TenantTokenOverridesGlobalFallback(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"message_id":"m_override"}`))
+	}))
+	defer srv.Close()
+
+	s := mustSender(t, "global-fallback-token", stubLookup(instagram.TenantConfig{IGBusinessID: "ig", Enabled: true, AccessToken: "tenant-own-token"}),
+		instagram.WithBaseURL(srv.URL))
+	if _, err := s.SendMessage(context.Background(), outMsg("hi")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "Bearer tenant-own-token" {
+		t.Errorf("expected tenant token to win over global fallback, got %q", gotAuth)
+	}
+}
+
+func TestSendMessage_NoTenantTokenNoGlobalFallback_AuthFailed(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s := mustSender(t, "", stubLookup(instagram.TenantConfig{IGBusinessID: "ig", Enabled: true}),
+		instagram.WithBaseURL(srv.URL))
+	_, err := s.SendMessage(context.Background(), outMsg("hi"))
+	if !errors.Is(err, inbox.ErrChannelAuthFailed) {
+		t.Fatalf("expected ErrChannelAuthFailed, got %v", err)
+	}
+	if h := atomic.LoadInt32(&hits); h != 0 {
+		t.Fatalf("expected no HTTP call with no usable token, got %d", h)
 	}
 }
 

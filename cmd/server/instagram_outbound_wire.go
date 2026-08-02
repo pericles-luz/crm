@@ -28,6 +28,7 @@ import (
 	channelinstagram "github.com/pericles-luz/crm/internal/adapter/channel/instagram"
 	"github.com/pericles-luz/crm/internal/adapter/channels/instagram"
 	rlredis "github.com/pericles-luz/crm/internal/adapter/ratelimit/redis"
+	pgstore "github.com/pericles-luz/crm/internal/adapter/store/postgres"
 	"github.com/pericles-luz/crm/internal/inbox"
 )
 
@@ -35,8 +36,22 @@ import (
 // rate-limited) Instagram sender WITHOUT wrapping it in a Router, so
 // inbox_wire_real.go can merge it with the WhatsApp / Messenger /
 // fake-customer entries into one combined Router built once per boot.
-// ok=false means Instagram outbound is disabled (no token / construction
-// error) — the caller should omit the entry from any combined route map.
+// ok=false means Instagram outbound is disabled (construction error) —
+// the caller should omit the entry from any combined route map.
+//
+// Unlike the pre-Business-Login-OAuth design, an empty
+// META_INSTAGRAM_GRAPH_TOKEN no longer disables the sender outright as
+// long as Business Login for Instagram is configured (META_INSTAGRAM_APP_ID
+// + META_APP_SECRET, see cmd/server/instagram_oauth_wire.go): a tenant
+// that connects via /settings/channels' "Conectar Instagram" supplies its
+// own TenantConfig.AccessToken, resolved per-send by
+// channelinstagram.Sender, and the global token becomes a legacy
+// fallback for any tenant that hasn't (re)connected — see
+// instagram_oauth_tokens (migration 0138) / InstagramOAuthTokenStore. An
+// environment with NEITHER the global token NOR Business Login configured
+// has no possible source of an Instagram token at all, so the sender
+// stays disabled there — same zero-risk posture as before for any
+// deployment that hasn't touched Instagram.
 //
 // This is the ONLY construction site for channelinstagram.Sender — do
 // not also build one inside assembleInstagramAdapter (inbound doesn't
@@ -44,10 +59,14 @@ import (
 // panics at boot.
 func buildInstagramOutboundEntry(getenv func(string) string, pool *pgxpool.Pool, rdb *goredis.Client, flag *instagram.EnvFeatureFlag) (inbox.OutboundChannel, bool) {
 	token := instagramOutboundGraphToken(getenv)
-	if token == "" {
-		log.Printf("crm: instagram outbound sender disabled (META_INSTAGRAM_GRAPH_TOKEN / META_GRAPH_TOKEN unset)")
+	if instagramOutboundSenderDisabled(getenv) {
+		log.Printf("crm: instagram outbound sender disabled (no META_INSTAGRAM_GRAPH_TOKEN and Business Login OAuth not configured)")
 		return nil, false
 	}
+	if token == "" {
+		log.Printf("crm: instagram outbound sender — no global fallback token (META_INSTAGRAM_GRAPH_TOKEN unset); relying on per-tenant Business Login tokens")
+	}
+	tokenStore := pgstore.NewInstagramOAuthTokenStore(pool)
 	lookup := channelinstagram.TenantConfigLookup(func(ctx context.Context, tenantID uuid.UUID) (channelinstagram.TenantConfig, error) {
 		igBusinessID, err := instagramOutboundIGBusinessID(ctx, pool, tenantID)
 		if err != nil {
@@ -57,7 +76,11 @@ func buildInstagramOutboundEntry(getenv func(string) string, pool *pgxpool.Pool,
 		if flagErr != nil {
 			return channelinstagram.TenantConfig{}, flagErr
 		}
-		return channelinstagram.TenantConfig{IGBusinessID: igBusinessID, Enabled: on}, nil
+		accessToken, _, _, tokErr := tokenStore.Get(ctx, tenantID)
+		if tokErr != nil {
+			return channelinstagram.TenantConfig{}, tokErr
+		}
+		return channelinstagram.TenantConfig{IGBusinessID: igBusinessID, Enabled: on, AccessToken: accessToken}, nil
 	})
 	sender, err := channelinstagram.New(token, lookup, prometheus.DefaultRegisterer)
 	if err != nil {
@@ -75,19 +98,43 @@ func buildInstagramOutboundEntry(getenv func(string) string, pool *pgxpool.Pool,
 	return oc, true
 }
 
-// envInstagramGraphToken optionally overrides META_GRAPH_TOKEN for
-// Instagram sends, mirroring envMessengerGraphToken's rationale: the
-// Instagram professional account can be authorized under a different
-// Business Manager / system user than WhatsApp.
+// envInstagramGraphToken holds the Instagram User access token obtained
+// via Business Login for Instagram (instagram.com/oauth/authorize →
+// api.instagram.com/oauth/access_token → the 60-day long-lived
+// exchange at graph.instagram.com/access_token — see
+// internal/adapter/channel/instagram/sender.go's package doc comment).
+// Unlike Messenger/WhatsApp, this is NOT a Business Manager System
+// User / Page Access Token and there is deliberately no fallback to
+// the shared META_GRAPH_TOKEN — that token belongs to a different auth
+// family (graph.facebook.com) and does not work against
+// graph.instagram.com.
 const envInstagramGraphToken = "META_INSTAGRAM_GRAPH_TOKEN"
 
-// instagramOutboundGraphToken reads META_INSTAGRAM_GRAPH_TOKEN, falling
-// back to the shared META_GRAPH_TOKEN.
+// envInstagramAppID is the Meta App's OAuth client_id for Business Login
+// for Instagram (see cmd/server/instagram_oauth_wire.go). Shared with
+// instagram.EnvAppSecret ("META_APP_SECRET", already used for webhook
+// signature verification) as the two preconditions for
+// buildInstagramOutboundEntry to construct the sender when no global
+// fallback token is set.
+const envInstagramAppID = "META_INSTAGRAM_APP_ID"
+
+// instagramOutboundGraphToken reads META_INSTAGRAM_GRAPH_TOKEN.
 func instagramOutboundGraphToken(getenv func(string) string) string {
-	if token := strings.TrimSpace(getenv(envInstagramGraphToken)); token != "" {
-		return token
-	}
-	return getenv("META_GRAPH_TOKEN")
+	return strings.TrimSpace(getenv(envInstagramGraphToken))
+}
+
+// instagramOutboundSenderDisabled reports whether Instagram outbound has
+// no possible token source at all: no global fallback AND Business Login
+// for Instagram isn't configured (so no tenant could ever obtain a
+// per-tenant token either). Split out as a pure function so the gating
+// logic is unit-testable without invoking channelinstagram.New — that
+// call registers Prometheus collectors on the process-wide
+// prometheus.DefaultRegisterer, and a second registration anywhere else
+// in the test binary would panic (see the file doc comment).
+func instagramOutboundSenderDisabled(getenv func(string) string) bool {
+	token := instagramOutboundGraphToken(getenv)
+	oauthConfigured := strings.TrimSpace(getenv(envInstagramAppID)) != "" && strings.TrimSpace(getenv(instagram.EnvAppSecret)) != ""
+	return token == "" && !oauthConfigured
 }
 
 // defaultInstagramRateMaxPerMin mirrors defaultMessengerRateMaxPerMin

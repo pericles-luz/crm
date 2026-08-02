@@ -1,16 +1,30 @@
-// Package instagram implements inbox.OutboundChannel against the Meta
-// Graph API send-message endpoint for the Instagram Direct channel.
+// Package instagram implements inbox.OutboundChannel against the
+// "Instagram API with Instagram Login" send-message endpoint for the
+// Instagram Direct channel.
 //
-// The endpoint is POST /v18.0/<ig_business_id>/messages. Like Messenger,
+// The endpoint is POST /v21.0/<ig_id>/messages on graph.instagram.com —
+// a distinct host and token family from Messenger/WhatsApp's
+// graph.facebook.com. This API generation authenticates with an
+// Instagram User access token obtained via Instagram's own OAuth
+// ("Business Login for Instagram": authorize at instagram.com/oauth/authorize,
+// exchange at api.instagram.com/oauth/access_token, then upgrade to a
+// 60-day long-lived token at graph.instagram.com/access_token) rather
+// than a Business Manager System User / Page Access Token. This
+// generation does NOT require the Instagram professional account to be
+// linked to a Facebook Page — the account is addressed directly by its
+// own numeric id.
+//
+// The request/response payload shape is otherwise identical to
+// Messenger's Graph API: recipient.id + message.text (or attachment),
+// Bearer auth header, {"message_id": "..."} on success. Like Messenger,
 // the recipient is a scoped user id (IGSID) and there are no HSM
 // templates — every send is freeform. Meta enforces the 24h
 // customer-care window server-side and rejects an out-of-window
 // freeform send with a 4xx; we surface that as ErrChannelRejected
-// (retries won't help) — the same posture the Messenger sender takes
-// for its structurally identical window, deliberately without a
-// client-side pre-check: Meta's policy exceptions (human-agent tag,
-// post-purchase tags) evolve faster than a local approximation could
-// track, so the server stays the single source of truth.
+// (retries won't help) — deliberately without a client-side pre-check:
+// Meta's policy exceptions (human-agent tag, post-purchase tags) evolve
+// faster than a local approximation could track, so the server stays
+// the single source of truth.
 //
 // Two message types are supported:
 //
@@ -42,8 +56,10 @@ import (
 	"github.com/pericles-luz/crm/internal/inbox"
 )
 
-// DefaultBaseURL is the Meta Graph base URL targeted in production.
-const DefaultBaseURL = "https://graph.facebook.com/v18.0"
+// DefaultBaseURL is the "Instagram API with Instagram Login" base URL
+// targeted in production — a distinct host from Messenger/WhatsApp's
+// graph.facebook.com (see package doc comment).
+const DefaultBaseURL = "https://graph.instagram.com/v21.0"
 
 // DefaultTimeout caps each HTTP attempt.
 const DefaultTimeout = 10 * time.Second
@@ -71,6 +87,13 @@ type TenantConfig struct {
 	// Enabled is the per-tenant feature flag (feature.instagram.enabled).
 	// When false the sender returns ErrChannelDisabled without an HTTP call.
 	Enabled bool
+	// AccessToken is the tenant's own Instagram User access token,
+	// obtained via Business Login for Instagram (see oauth.go) and
+	// resolved per-send. Empty falls back to the Sender's
+	// constructor-level token (the legacy single global
+	// META_INSTAGRAM_GRAPH_TOKEN); if both are empty the send fails with
+	// ErrChannelAuthFailed.
+	AccessToken string
 }
 
 // TenantConfigLookup resolves a tenant ID to its sender config.
@@ -128,11 +151,10 @@ func WithBackoffBase(d time.Duration) Option {
 	}
 }
 
-// New constructs a Sender. token, config, and reg are required.
+// New constructs a Sender. config and reg are required; token is the
+// legacy global fallback and MAY be empty when every tenant is expected
+// to supply its own TenantConfig.AccessToken instead (see TenantConfig).
 func New(token string, config TenantConfigLookup, reg prometheus.Registerer, opts ...Option) (*Sender, error) {
-	if token == "" {
-		return nil, errors.New("instagram: META_INSTAGRAM_GRAPH_TOKEN must not be empty")
-	}
 	if config == nil {
 		return nil, errors.New("instagram: tenant config lookup must not be nil")
 	}
@@ -176,6 +198,14 @@ func (s *Sender) SendMessage(ctx context.Context, m inbox.OutboundMessage) (stri
 		outcome = outcomeAuth
 		return "", fmt.Errorf("%w: tenant ig_business_id missing", inbox.ErrChannelAuthFailed)
 	}
+	token := cfg.AccessToken
+	if token == "" {
+		token = s.token
+	}
+	if token == "" {
+		outcome = outcomeAuth
+		return "", fmt.Errorf("%w: no tenant access token and no global fallback token configured", inbox.ErrChannelAuthFailed)
+	}
 
 	payload, err := encodePayload(m)
 	if err != nil {
@@ -196,7 +226,7 @@ func (s *Sender) SendMessage(ctx context.Context, m inbox.OutboundMessage) (stri
 			case <-time.After(delay):
 			}
 		}
-		mid, sendErr := s.doRequest(ctx, url, payload)
+		mid, sendErr := s.doRequest(ctx, url, token, payload)
 		if sendErr == nil {
 			outcome = outcomeSuccess
 			return mid, nil
@@ -217,14 +247,15 @@ func (s *Sender) SendMessage(ctx context.Context, m inbox.OutboundMessage) (stri
 }
 
 // doRequest performs a single Graph call and maps the HTTP outcome to an
-// inbox.* sentinel.
-func (s *Sender) doRequest(ctx context.Context, url string, body []byte) (string, error) {
+// inbox.* sentinel. token is the already-resolved per-send bearer token
+// (tenant AccessToken, falling back to the Sender's global token).
+func (s *Sender) doRequest(ctx context.Context, url, token string, body []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("%w: build request: %v", inbox.ErrChannelTransient, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

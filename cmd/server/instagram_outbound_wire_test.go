@@ -27,6 +27,60 @@ func TestBuildInstagramOutboundEntry_DisabledWhenTokenMissing(t *testing.T) {
 	}
 }
 
+// TestInstagramOutboundSenderDisabled_GateLogic pins the boot-time
+// disablement gate WITHOUT ever calling channelinstagram.New (see the
+// file doc comment) — the sender is now possible whenever either a
+// global fallback token OR a fully-configured Business Login OAuth
+// (META_INSTAGRAM_APP_ID + META_APP_SECRET) is present.
+func TestInstagramOutboundSenderDisabled_GateLogic(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "nothing configured", env: map[string]string{}, want: true},
+		{name: "global token only", env: map[string]string{"META_INSTAGRAM_GRAPH_TOKEN": "tok"}, want: false},
+		{
+			name: "oauth fully configured, no global token",
+			env: map[string]string{
+				"META_INSTAGRAM_APP_ID": "app123",
+				"META_APP_SECRET":       "secret",
+			},
+			want: false,
+		},
+		{
+			name: "oauth app id only, missing app secret",
+			env:  map[string]string{"META_INSTAGRAM_APP_ID": "app123"},
+			want: true,
+		},
+		{
+			name: "oauth app secret only, missing app id",
+			env:  map[string]string{"META_APP_SECRET": "secret"},
+			want: true,
+		},
+		{
+			name: "both global token and oauth configured",
+			env: map[string]string{
+				"META_INSTAGRAM_GRAPH_TOKEN": "tok",
+				"META_INSTAGRAM_APP_ID":      "app123",
+				"META_APP_SECRET":            "secret",
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(k string) string { return tc.env[k] }
+			if got := instagramOutboundSenderDisabled(getenv); got != tc.want {
+				t.Fatalf("instagramOutboundSenderDisabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInstagramOutboundGraphToken(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -34,22 +88,19 @@ func TestInstagramOutboundGraphToken(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
-		{name: "both unset", env: map[string]string{}, want: ""},
+		{name: "unset", env: map[string]string{}, want: ""},
 		{
-			name: "falls back to shared META_GRAPH_TOKEN",
-			env:  map[string]string{"META_GRAPH_TOKEN": "whatsapp-and-instagram-token"},
-			want: "whatsapp-and-instagram-token",
+			// No fallback to META_GRAPH_TOKEN: that's a Business Manager
+			// System User / Page Access Token (graph.facebook.com), a
+			// different auth family from the Instagram User access token
+			// this sender needs (graph.instagram.com) — see the const's
+			// doc comment.
+			name: "shared META_GRAPH_TOKEN is NOT used as a fallback",
+			env:  map[string]string{"META_GRAPH_TOKEN": "whatsapp-token"},
+			want: "",
 		},
 		{
-			name: "dedicated override wins over the shared token",
-			env: map[string]string{
-				"META_GRAPH_TOKEN":           "shared-token",
-				"META_INSTAGRAM_GRAPH_TOKEN": "instagram-only-token",
-			},
-			want: "instagram-only-token",
-		},
-		{
-			name: "dedicated token alone (no shared token configured)",
+			name: "dedicated token",
 			env:  map[string]string{"META_INSTAGRAM_GRAPH_TOKEN": "instagram-only-token"},
 			want: "instagram-only-token",
 		},

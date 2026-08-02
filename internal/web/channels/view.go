@@ -170,6 +170,16 @@ type channelRow struct {
 	// "Aberto" (every atendente of the tenant sees the channel). It is the
 	// visible signal that the roster below is actually enforced.
 	Restricted bool
+	// ShowInstagramConnect renders the "Conectar Instagram" action:
+	// true only for an Instagram-typed channel when the OAuth connector
+	// dependency is wired (Deps.InstagramOAuth != nil). A nil dependency
+	// (Business Login not configured in this environment) hides the
+	// button entirely rather than offering a dead-end link.
+	ShowInstagramConnect bool
+	// InstagramConnected reports whether this tenant already has a
+	// stored Business Login token (best-effort: a lookup failure just
+	// renders "Conectar" rather than failing the whole row list).
+	InstagramConnected bool
 }
 
 // rosterEntry is one checkbox row in the shared access-roster primitive.
@@ -277,6 +287,11 @@ type pageData struct {
 	CSRFToken        string
 	CSPNonce         string
 	TenantThemeStyle template.CSS
+	// Toast renders a one-time success/error banner after a full-page
+	// redirect lands back here (e.g. the Instagram OAuth callback's
+	// ?instagram=connected|error) — a message means render it, a zero
+	// value renders nothing (see the page template's guard).
+	Toast toastData
 }
 
 // modalData drives the create / edit form rendered into #channels-modal.

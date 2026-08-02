@@ -202,7 +202,7 @@ func TestAssembleWebChannelsHandlerWithDeps_ThreadsFakeCustomerFlag(t *testing.T
 	t.Parallel()
 	for _, on := range []bool{false, true} {
 		store := &recordingChannelsStore{}
-		h, err := assembleWebChannelsHandlerWithDeps(store, nil, nil, false, on, nil)
+		h, err := assembleWebChannelsHandlerWithDeps(store, nil, nil, false, on, nil, nil)
 		if err != nil {
 			t.Fatalf("assemble(on=%v): %v", on, err)
 		}

@@ -324,6 +324,16 @@ func runWithListener(ctx context.Context, ln net.Listener, getenv func(string) s
 		ig.Register(mux)
 	}
 
+	// Business Login for Instagram OAuth callback — the redirect target
+	// for /settings/channels' "Conectar Instagram" (SIN-64971 follow-up).
+	// Independent of the inbound webhook wiring above: fail-soft on its
+	// own env vars (META_INSTAGRAM_APP_ID / META_APP_SECRET), own pool.
+	igOAuth := buildInstagramOAuthWiring(ctx, getenv)
+	if igOAuth != nil {
+		defer igOAuth.Cleanup()
+		igOAuth.Register(mux)
+	}
+
 	// SIN-62964 PIX Inter webhook receiver. Fail-soft on missing
 	// secret / DSN / Redis just like the other webhook wirings; the
 	// more-specific `POST /webhooks/pix/inter` pattern wins over the
