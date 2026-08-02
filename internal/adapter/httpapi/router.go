@@ -1439,6 +1439,7 @@ func NewRouter(deps Deps) http.Handler {
 				authed.Method(http.MethodGet, "/settings/channels/{id}/edit", webChannels)
 				authed.Method(http.MethodPost, "/settings/channels/{id}", webChannels)
 				authed.Method(http.MethodPost, "/settings/channels/{id}/active", webChannels)
+				authed.Method(http.MethodGet, "/settings/channels/{id}/connect-instagram", webChannels)
 			}
 
 			// SIN-63186 — LGPD data-subject admin surface (Fase 6 PR3).
