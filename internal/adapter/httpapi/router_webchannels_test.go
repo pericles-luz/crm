@@ -126,6 +126,28 @@ func TestRouter_WebChannels_TogglePostHappyPath(t *testing.T) {
 	}
 }
 
+// TestRouter_WebChannels_ConnectInstagramReachesHandler pins the chi
+// route-enumeration trap this exact route hit in production: the inner
+// web/channels mux answers GET .../{id}/connect-instagram just fine, but
+// a missing authed.Method(...) entry here 404s the real button while
+// inner-mux tests keep passing (reference_crm_inbox_chi_route_enumeration_trap).
+func TestRouter_WebChannels_ConnectInstagramReachesHandler(t *testing.T) {
+	t.Parallel()
+	rec := &recordingContacts{}
+	h := newWebChannelsRouter(t, "tok-c6", rec, &csrfRecorder{})
+	const host = "acme.crm.local"
+	sess, _ := loginAndCookies(t, h, host)
+
+	target := "/settings/channels/" + uuid.New().String() + "/connect-instagram"
+	got := do(t, h, http.MethodGet, host, target, nil, sess)
+	if got.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 (route must be chi-enumerated); recorder calls=%+v", got.Code, rec.calls)
+	}
+	if len(rec.calls) != 1 || rec.calls[0].path != target || !rec.calls[0].hadPrincipal {
+		t.Fatalf("inner call wrong: %+v", rec.calls)
+	}
+}
+
 func TestRouter_WebChannels_NilDepsKeepRouteUnmounted(t *testing.T) {
 	t.Parallel()
 	h := newWebChannelsRouter(t, "tok-c5", nil, &csrfRecorder{})
