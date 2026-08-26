@@ -33,6 +33,44 @@ set -euo pipefail
 
 log() { echo "$@" >&2; }
 
+# Image whose parser is authoritative for infra/caddy/unbound.conf. Keep in
+# sync with the `unbound` service in deploy/compose/compose.stg.yml — a
+# config that parses under a different Unbound build proves nothing about
+# the one that actually boots on the host.
+UNBOUND_IMAGE="${UNBOUND_IMAGE:-mvance/unbound:1.22.0@sha256:76906da36d1806f3387338f15dcf8b357c51ce6897fb6450d6ce010460927e90}"
+
+# unbound_conf_parses <conf-file>
+#
+# Runs the real `unbound-checkconf` over the sidecar config.
+#
+# Why this gate exists: this lint used to check only compose<->unbound
+# *wiring*, never whether the config it points at is loadable. A config
+# using BIND's `deny-answer-address:` (not an Unbound keyword) shipped to
+# stg, unbound refused to start, and because Caddy pins `dns:` at the
+# sidecar it lost ALL name resolution — every ACME renewal failed with
+# "server misbehaving" and a tenant cert expired before anyone noticed.
+# An unparseable config is a silent TLS outage on a ~60-day fuse, so it
+# must fail here rather than on the host.
+unbound_conf_parses() {
+	local conf="$1"
+
+	if command -v unbound-checkconf >/dev/null 2>&1; then
+		unbound-checkconf "$conf"
+		return
+	fi
+
+	if command -v docker >/dev/null 2>&1; then
+		docker run --rm \
+			-v "$(realpath "$conf"):/unbound.conf:ro" \
+			--entrypoint unbound-checkconf \
+			"$UNBOUND_IMAGE" /unbound.conf
+		return
+	fi
+
+	log "  neither unbound-checkconf nor docker available — cannot validate"
+	return 1
+}
+
 # active_caddyfile <compose-file>
 #
 # Reads the `caddy` service's `command:` list and pulls the path passed
@@ -163,12 +201,33 @@ caddy_dns_pinned_to_unbound() {
 
 fail=0
 files=( "$@" )
+default_scan=0
 if [[ ${#files[@]} -eq 0 ]]; then
+	default_scan=1
 	shopt -s nullglob
 	files=( deploy/compose/compose*.yml deploy/compose/compose*.yaml )
 	if [[ ${#files[@]} -eq 0 ]]; then
 		log "no compose files found in deploy/compose/"
 		exit 2
+	fi
+fi
+
+# Only in default-scan mode: the fixture self-test drives this script with
+# explicit synthetic compose paths and has no bearing on the real sidecar
+# config, so validating it there would just pay the docker cost per case.
+if (( default_scan )); then
+	unbound_conf="infra/caddy/unbound.conf"
+	if [[ -f "$unbound_conf" ]]; then
+		log "${unbound_conf}: validating with unbound-checkconf"
+		if unbound_conf_parses "$unbound_conf"; then
+			log "${unbound_conf}: OK (parses)"
+		else
+			log "${unbound_conf}: FAIL — config does not parse; the sidecar would crash-loop and take Caddy's DNS (and ACME renewal) down with it"
+			fail=1
+		fi
+	else
+		log "${unbound_conf}: FAIL — sidecar config missing"
+		fail=1
 	fi
 fi
 
