@@ -1489,3 +1489,5 @@ When you want to take a security or feature update for one of them:
   Caddy wildcard host plus a future per-tenant probe (Fase 1 follow-up).
 - **No host-level Prometheus / log shipping yet.** PR10/11 of Fase 0 wires
   alerting and observability; the runbook above is what we have until then.
+
+<!-- ci-trigger-smoke-test: dummy, no-op edit to verify push-to-main triggers ci/cd-stg after GH Actions delivery lag observed 2026-08-26. Safe to remove once confirmed. -->
