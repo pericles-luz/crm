@@ -106,9 +106,15 @@ func (a *Adapter) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if dir := a.timestampWindowDirection(&env, a.clock.Now()); dir != "" {
+		var rawTime int64
+		if len(env.Entry) > 0 {
+			rawTime = env.Entry[0].Time
+		}
 		a.logger.Warn("instagram.timestamp_outside_window",
 			slog.String("body_sha256", hashHex(body)),
-			slog.String("direction", dir))
+			slog.String("direction", dir),
+			slog.Int64("entry_time_raw", rawTime),
+			slog.Int64("now_unix", a.clock.Now().Unix()))
 		writeAck(w)
 		return
 	}
