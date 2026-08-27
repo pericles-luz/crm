@@ -36,7 +36,12 @@ type igEnvelope struct {
 }
 
 type igEntry struct {
-	ID        string        `json:"id"` // ig business account id (the recipient)
+	ID string `json:"id"` // ig business account id (the recipient)
+	// Time is unix MILLISECONDS, confirmed against a real production
+	// payload (2026-08-27) — the "Instagram API with Instagram Login"
+	// webhook generation does not follow the classic Messenger Platform
+	// convention of whole seconds this field's shape was modeled on.
+	// timestampWindowDirection parses it with time.UnixMilli accordingly.
 	Time      int64         `json:"time"`
 	Messaging []igMessaging `json:"messaging"`
 }
@@ -282,8 +287,12 @@ func (a *Adapter) requestMediaScans(ctx context.Context, tenantID, messageID uui
 
 // timestampWindowDirection returns "" when every entry[].time falls
 // inside [now-PastWindow, now+FutureSkew], or the direction label
-// ("past" / "future") of the first breach. Meta sets entry[].time in
-// unix seconds.
+// ("past" / "future") of the first breach. entry[].time is unix
+// MILLISECONDS (see igEntry.Time's doc comment) — confirmed against a
+// real production payload; treating it as seconds (the classic
+// Messenger Platform convention this was originally modeled on) made
+// every real delivery compute to a timestamp ~56000 years in the
+// future and drop every single inbound message.
 func (a *Adapter) timestampWindowDirection(env *igEnvelope, now time.Time) string {
 	if env == nil || len(env.Entry) == 0 {
 		return ""
@@ -294,7 +303,7 @@ func (a *Adapter) timestampWindowDirection(env *igEnvelope, now time.Time) strin
 		if e.Time <= 0 {
 			continue
 		}
-		ts := time.Unix(e.Time, 0).UTC()
+		ts := time.UnixMilli(e.Time).UTC()
 		if ts.Before(pastBound) {
 			return "past"
 		}
