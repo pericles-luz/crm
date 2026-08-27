@@ -382,6 +382,9 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	if h.deps.ListMessagesSince != nil {
 		mux.HandleFunc("GET /inbox/conversations/{id}/messages/since", h.since)
 	}
+	if h.deps.ListSummaries != nil {
+		mux.HandleFunc("GET /inbox/list/since", h.listSince)
+	}
 	if h.deps.AIAssist.Summarizer != nil {
 		mux.HandleFunc("POST /inbox/conversations/{id}/ai-assist", h.aiAssist)
 	}
@@ -598,10 +601,12 @@ func (f inboxFilter) nonDefault() bool {
 // row; oob flags the region for an out-of-band swap.
 func (h *Handler) buildListRegion(r *http.Request, tenantID uuid.UUID, f inboxFilter, activeID uuid.UUID, oob bool) (listRegionData, error) {
 	region := listRegionData{
-		Filters:     f,
-		HasFilters:  f.nonDefault(),
-		OOB:         oob,
-		FilterQuery: f.query(),
+		Filters:      f,
+		HasFilters:   f.nonDefault(),
+		OOB:          oob,
+		FilterQuery:  f.query(),
+		ActiveID:     activeID,
+		ShowListPoll: h.deps.ListSummaries != nil,
 	}
 
 	if h.deps.ListSummaries == nil {
@@ -626,6 +631,7 @@ func (h *Handler) buildListRegion(r *http.Request, tenantID uuid.UUID, f inboxFi
 				Active:        c.ID == activeID,
 			})
 		}
+		region.ListPollCursor = listPollCursor(region.Items)
 		return region, nil
 	}
 
@@ -683,6 +689,7 @@ func (h *Handler) buildListRegion(r *http.Request, tenantID uuid.UUID, f inboxFi
 		}
 		region.Items = append(region.Items, row)
 	}
+	region.ListPollCursor = listPollCursor(region.Items)
 	return region, nil
 }
 
@@ -1173,6 +1180,78 @@ func (h *Handler) since(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// listSince is the conversation-list live-refresh poll: the counterpart
+// to `since` for the left-hand list instead of the open thread. A hidden
+// sentinel in the list region polls this endpoint every few seconds
+// through an exclusive cursor (the max LastMessageAt, as Unix
+// nanoseconds, among the rows the client already holds under the current
+// filters). The handler re-runs the same read side buildListRegion uses
+// (no new SQL) and compares its freshly computed cursor:
+//
+//   - 204 No Content when nothing is newer (the common case), so htmx
+//     leaves the sentinel untouched and keeps polling.
+//   - 200 + the whole row list re-rendered (OOB-swapped by id) plus a
+//     fresh sentinel carrying the advanced cursor, when anything changed
+//     — this is what makes a message on a conversation OTHER than the
+//     one currently open reorder/refresh into view without a manual
+//     reload or navigation.
+//
+// Security: buildListRegion is tenant-scoped and applies the same
+// channel-access restriction as the list/view handlers, so a poll can
+// never surface another tenant's (or another atendente's out-of-scope)
+// conversations. A malformed cursor or active id is rejected/ignored the
+// same way the thread poll's `since` handler treats them.
+//
+// Cache-Control: no-store keeps every poll hitting the origin so a
+// freshly persisted inbound message surfaces within the next poll
+// window.
+func (h *Handler) listSince(w http.ResponseWriter, r *http.Request) {
+	tenant, err := tenancy.FromContext(r.Context())
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "tenant required", err)
+		return
+	}
+	var after int64
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		after, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid cursor", http.StatusBadRequest)
+			return
+		}
+	}
+	// A malformed/absent active id degrades to uuid.Nil (no row marked
+	// active) rather than erroring the poll.
+	activeID, _ := uuid.Parse(r.URL.Query().Get("active"))
+
+	filter := parseInboxFilter(r)
+	region, err := h.buildListRegion(r, tenant.ID, filter, activeID, false)
+	if err != nil {
+		h.fail(w, http.StatusInternalServerError, "list conversations", err)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	if region.ListPollCursor <= after {
+		// Nothing new: 204 No Content — see `since`'s identical contract
+		// (htmx treats 204 as an explicit no-swap, so the sentinel and its
+		// every-5s poll attrs are left intact).
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	region.ItemsOOB = true
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := listLiveUpdateTmpl.Execute(w, listLiveUpdate{
+		Poll: listLivePollData{
+			Filters:  region.Filters,
+			ActiveID: activeID,
+			Cursor:   region.ListPollCursor,
+		},
+		Region: region,
+	}); err != nil {
+		h.deps.Logger.Error("web/inbox: render list live update", "err", err)
+	}
+}
+
 // assign handles POST /inbox/conversations/{id}/assign (SIN-64979).
 // It validates the form-supplied targetUserID (UUID shape only — tenant
 // and role checks are the use-case's responsibility), delegates to
@@ -1525,6 +1604,22 @@ func liveCursor(items []inboxusecase.MessageView) string {
 	return strconv.FormatInt(items[len(items)-1].CreatedAt.UnixNano(), 10)
 }
 
+// listPollCursor renders the conversation-list live-poll cursor: the max
+// LastMessageAt (Unix-nanoseconds) across rows, 0 for an empty list. A
+// non-zero seed for a non-empty list means the sentinel's very first
+// background poll only fires on a genuine change, never immediately
+// after the page just rendered the same state (mirrors liveCursor's
+// non-empty-thread invariant for the thread poll).
+func listPollCursor(items []listRow) int64 {
+	var max int64
+	for _, it := range items {
+		if ns := it.LastMessageAt.UnixNano(); ns > max {
+			max = ns
+		}
+	}
+	return max
+}
+
 // buildInboxNavItems returns the SidebarNav primary nav for the inbox
 // page (SIN-65104). It mirrors funnel's buildFunnelNavItems so the two
 // post-login surfaces share one nav, with "Inbox" marked active here so
@@ -1587,6 +1682,24 @@ type listRegionData struct {
 	// control.
 	ChannelOptions []AccessibleChannel
 	FilterQuery    string // "?state=…&channel=…&assigned=…&channel_id=…" for row links
+	// ActiveID is the currently open conversation (uuid.Nil from the list
+	// handler, the viewed conversation's id from the view handler's OOB
+	// refresh). Threaded into Items[].Active and carried by the list
+	// live-poll sentinel so a background refresh still marks the right row.
+	ActiveID uuid.UUID
+	// ShowListPoll gates the conversation-list live-refresh sentinel: true
+	// only when ListSummaries is wired (mirrors viewData.ShowLivePoll for
+	// the thread poll). ListPollCursor seeds its exclusive cursor — the max
+	// LastMessageAt (Unix-nanoseconds) among Items, 0 for an empty list.
+	ShowListPoll   bool
+	ListPollCursor int64
+	// ItemsOOB renders the <ul id="conversation-list"> root with
+	// hx-swap-oob="true" — set only by the listSince handler's composite
+	// response, which swaps the row list by id independently of the rest
+	// of this region (filter bar untouched). Every other render path
+	// leaves this false, so conversation_list's normal in-place render is
+	// unaffected.
+	ItemsOOB bool
 }
 
 // layoutData drives the full-page inbox shell template. SIN-65104 wraps
@@ -1673,6 +1786,30 @@ type threadLivePollData struct {
 type threadLiveUpdate struct {
 	Poll     threadLivePollData
 	Messages []inboxusecase.MessageView
+}
+
+// listLivePollData drives the conversation-list live-refresh sentinel —
+// the hidden element that polls GET /inbox/list/since every few seconds.
+// Cursor is the exclusive Unix-nanosecond cursor (the max LastMessageAt
+// among the rows the client already holds); Filters + ActiveID keep the
+// poll querying under the operator's current filters and marking the
+// right row Active. OOB is true only when re-emitted as an out-of-band
+// swap (the listSince handler advancing the cursor) and false for the
+// in-place render inside inboxListRegionTmpl.
+type listLivePollData struct {
+	Filters  inboxFilter
+	ActiveID uuid.UUID
+	Cursor   int64
+	OOB      bool
+}
+
+// listLiveUpdate drives the listSince handler's 200 response: a fresh
+// sentinel (Poll, carrying the advanced cursor) plus the whole
+// conversation list re-rendered (Region, with ItemsOOB=true) so htmx
+// swaps the <ul id="conversation-list"> by id in place.
+type listLiveUpdate struct {
+	Poll   listLivePollData
+	Region listRegionData
 }
 
 // contextPanelData is the web-local projection of

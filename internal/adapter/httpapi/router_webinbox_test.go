@@ -191,6 +191,7 @@ func TestRouter_WebInbox_NilDepsKeepRouteUnmounted(t *testing.T) {
 		"/inbox/conversations/" + uuid.New().String(),
 		"/inbox/conversations/" + uuid.New().String() + "/messages/" + uuid.New().String() + "/status",
 		"/inbox/conversations/" + uuid.New().String() + "/messages/since",
+		"/inbox/list/since",
 	} {
 		rec := do(t, h, http.MethodGet, host, path, nil, sess)
 		if rec.Code != http.StatusNotFound {
@@ -208,7 +209,8 @@ func TestRouter_WebInbox_NilDepsKeepRouteUnmounted(t *testing.T) {
 // guard against the chi-enumeration miss that recurred on assign
 // (SIN-64979), ai-assist (SIN-65004), reset (SIN-65392/65406), and
 // again here (SIN-65419): the inner-mux tests pass while the chi mount
-// 404s in production.
+// 404s in production. /inbox/list/since (the conversation-list
+// counterpart to messages/since) is included for the same reason.
 func TestRouter_WebInbox_NestedRoutesReachInnerHandler(t *testing.T) {
 	t.Parallel()
 	inboxH := &recordingInbox{}
@@ -223,14 +225,15 @@ func TestRouter_WebInbox_NestedRoutesReachInnerHandler(t *testing.T) {
 		"/inbox/conversations/" + convID,
 		"/inbox/conversations/" + convID + "/messages/" + msgID + "/status",
 		"/inbox/conversations/" + convID + "/messages/since",
+		"/inbox/list/since",
 	} {
 		rec := do(t, h, http.MethodGet, host, path, nil, sess)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status=%d for %q, want 200 (atendente must reach inbox subtree); body=%q", rec.Code, path, rec.Body.String())
 		}
 	}
-	if len(inboxH.calls) != 3 {
-		t.Fatalf("inner call count=%d, want 3 (%+v)", len(inboxH.calls), inboxH.calls)
+	if len(inboxH.calls) != 4 {
+		t.Fatalf("inner call count=%d, want 4 (%+v)", len(inboxH.calls), inboxH.calls)
 	}
 }
 

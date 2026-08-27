@@ -1560,6 +1560,17 @@ func NewRouter(deps Deps) http.Handler {
 				// and status polls. When ListMessagesSince is nil the inner mux
 				// returns 404 for the GET, so listing it here is safe either way.
 				authed.Method(http.MethodGet, "/inbox/conversations/{id}/messages/since", webInbox)
+				// Conversation-list live-refresh poll (same feature family as
+				// SIN-65419 above, extended to the left-hand list so a message
+				// on a conversation OTHER than the open one also live-updates).
+				// Same defect class as every route in this block: the inner mux
+				// (web/inbox Routes) registers GET /inbox/list/since
+				// conditionally on the ListSummaries dep, but chi enumerates the
+				// subtree route-by-route, so it must be listed here too or it
+				// 404s before the handler ever runs. When ListSummaries is nil
+				// the inner mux returns 404 for the GET, so listing it here is
+				// safe either way.
+				authed.Method(http.MethodGet, "/inbox/list/since", webInbox)
 				// SIN-64979 — conversation-assignment write route. The inner
 				// mux (web/inbox Routes) registers it conditionally on the
 				// AssignConversation dep, but chi enumerates the subtree
