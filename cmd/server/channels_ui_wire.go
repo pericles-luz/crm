@@ -120,11 +120,11 @@ func assembleWebChannelsHandler(store channelsStore, userLabels userlabel.Direct
 
 // buildInstagramConnector wires the "Conectar Instagram" self-service
 // glue when Business Login for Instagram is configured (the same
-// META_INSTAGRAM_APP_ID + META_APP_SECRET precondition
+// META_INSTAGRAM_APP_ID + META_INSTAGRAM_APP_SECRET precondition
 // buildInstagramOAuthWiring checks) — nil otherwise, hiding the button.
 func buildInstagramConnector(pool instagramConnectorPool, getenv func(string) string) webchannels.InstagramConnector {
 	appID := strings.TrimSpace(getenv(envInstagramAppID))
-	appSecret := strings.TrimSpace(getenv(instagram.EnvAppSecret))
+	appSecret := strings.TrimSpace(getenv(instagram.EnvInstagramAppSecret))
 	if appID == "" || appSecret == "" {
 		return nil
 	}

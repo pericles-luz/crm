@@ -31,7 +31,7 @@ func TestBuildInstagramOutboundEntry_DisabledWhenTokenMissing(t *testing.T) {
 // disablement gate WITHOUT ever calling channelinstagram.New (see the
 // file doc comment) — the sender is now possible whenever either a
 // global fallback token OR a fully-configured Business Login OAuth
-// (META_INSTAGRAM_APP_ID + META_APP_SECRET) is present.
+// (META_INSTAGRAM_APP_ID + META_INSTAGRAM_APP_SECRET) is present.
 func TestInstagramOutboundSenderDisabled_GateLogic(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -44,8 +44,8 @@ func TestInstagramOutboundSenderDisabled_GateLogic(t *testing.T) {
 		{
 			name: "oauth fully configured, no global token",
 			env: map[string]string{
-				"META_INSTAGRAM_APP_ID": "app123",
-				"META_APP_SECRET":       "secret",
+				"META_INSTAGRAM_APP_ID":     "app123",
+				"META_INSTAGRAM_APP_SECRET": "secret",
 			},
 			want: false,
 		},
@@ -56,7 +56,7 @@ func TestInstagramOutboundSenderDisabled_GateLogic(t *testing.T) {
 		},
 		{
 			name: "oauth app secret only, missing app id",
-			env:  map[string]string{"META_APP_SECRET": "secret"},
+			env:  map[string]string{"META_INSTAGRAM_APP_SECRET": "secret"},
 			want: true,
 		},
 		{
@@ -64,7 +64,7 @@ func TestInstagramOutboundSenderDisabled_GateLogic(t *testing.T) {
 			env: map[string]string{
 				"META_INSTAGRAM_GRAPH_TOKEN": "tok",
 				"META_INSTAGRAM_APP_ID":      "app123",
-				"META_APP_SECRET":            "secret",
+				"META_INSTAGRAM_APP_SECRET":  "secret",
 			},
 			want: false,
 		},

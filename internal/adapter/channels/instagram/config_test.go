@@ -25,7 +25,7 @@ func TestConfigFromEnv_RequiresAppSecret(t *testing.T) {
 func TestConfigFromEnv_RequiresVerifyToken(t *testing.T) {
 	t.Parallel()
 	_, err := instagram.ConfigFromEnv(func(s string) string {
-		if s == instagram.EnvAppSecret {
+		if s == instagram.EnvInstagramAppSecret {
 			return "secret"
 		}
 		return ""
@@ -46,7 +46,7 @@ func TestConfigFromEnv_PopulatesDefaults(t *testing.T) {
 	t.Parallel()
 	cfg, err := instagram.ConfigFromEnv(func(s string) string {
 		switch s {
-		case instagram.EnvAppSecret:
+		case instagram.EnvInstagramAppSecret:
 			return "secret"
 		case instagram.EnvVerifyToken:
 			return "verify"
