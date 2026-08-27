@@ -10,7 +10,7 @@ import (
 func TestBuildInstagramOAuthWiring_DisabledWhenAppIDMissing(t *testing.T) {
 	t.Parallel()
 	got := buildInstagramOAuthWiring(context.Background(), func(k string) string {
-		if k == instagram.EnvAppSecret {
+		if k == instagram.EnvInstagramAppSecret {
 			return "s"
 		}
 		return ""
@@ -39,7 +39,7 @@ func TestBuildInstagramOAuthWiring_DisabledWhenDSNMissing(t *testing.T) {
 		switch k {
 		case envInstagramAppID:
 			return "app123"
-		case instagram.EnvAppSecret:
+		case instagram.EnvInstagramAppSecret:
 			return "s"
 		}
 		return ""

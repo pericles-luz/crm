@@ -34,16 +34,16 @@ type instagramOAuthWiring struct {
 
 // buildInstagramOAuthWiring assembles the Business Login for Instagram
 // OAuth callback receiver. Returns nil when META_INSTAGRAM_APP_ID or
-// META_APP_SECRET is unset, or DATABASE_URL is unset/unreachable — the
+// META_INSTAGRAM_APP_SECRET is unset, or DATABASE_URL is unset/unreachable — the
 // caller treats nil as "skip mounting the OAuth callback route" (the
 // "Conectar Instagram" button is correspondingly hidden by
 // channels_ui_wire.go's instagramConnectorGlue under the same env-var
 // precondition, so operators never see a dead-end link).
 func buildInstagramOAuthWiring(ctx context.Context, getenv func(string) string) *instagramOAuthWiring {
 	appID := strings.TrimSpace(getenv(envInstagramAppID))
-	appSecret := strings.TrimSpace(getenv(instagram.EnvAppSecret))
+	appSecret := strings.TrimSpace(getenv(instagram.EnvInstagramAppSecret))
 	if appID == "" || appSecret == "" {
-		log.Printf("crm: instagram oauth callback disabled (META_INSTAGRAM_APP_ID / META_APP_SECRET unset)")
+		log.Printf("crm: instagram oauth callback disabled (META_INSTAGRAM_APP_ID / META_INSTAGRAM_APP_SECRET unset)")
 		return nil
 	}
 	dsn := getenv(pgpool.EnvDSN)

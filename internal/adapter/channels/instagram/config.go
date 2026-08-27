@@ -9,13 +9,30 @@ import (
 	"github.com/google/uuid"
 )
 
-// Env var names. META_APP_SECRET signs the inbound webhook (shared with
-// the WhatsApp adapter on the same Meta app); META_INSTAGRAM_VERIFY_TOKEN
-// is echoed back during Meta's GET subscription handshake. Both are
-// required; an empty value at startup is a misconfiguration the
-// composition root surfaces by skipping the adapter wire.
+// Env var names.
+//
+// META_INSTAGRAM_APP_SECRET signs the inbound webhook AND is the OAuth
+// client_secret for Business Login (cmd/server/instagram_oauth_wire.go,
+// channels_ui_wire.go). It is DELIBERATELY DISTINCT from
+// META_APP_SECRET (WhatsApp/Messenger's app) — incident 2026-08-27:
+// Instagram Business Login ("lmhost") and WhatsApp/Messenger turned out
+// to be two SEPARATE Meta Apps despite the original doc comment here
+// claiming they shared one. Overloading a single META_APP_SECRET across
+// both caused a literal last-line-wins collision in .env.stg: whichever
+// app's secret was written last in the file silently broke webhook
+// signature verification for the OTHER app, with no error at boot (both
+// values are just non-empty strings) — only a live delivery failure.
+// There is deliberately no fallback to META_APP_SECRET, mirroring the
+// existing META_INSTAGRAM_GRAPH_TOKEN / META_GRAPH_TOKEN precedent for
+// the exact same reason (different auth family, and a "convenient"
+// fallback is exactly what silently masks a real two-app setup).
+//
+// META_INSTAGRAM_VERIFY_TOKEN is echoed back during Meta's GET
+// subscription handshake. Both are required at boot; an empty value is
+// a misconfiguration the composition root surfaces by skipping the
+// adapter wire.
 const (
-	EnvAppSecret              = "META_APP_SECRET"
+	EnvInstagramAppSecret     = "META_INSTAGRAM_APP_SECRET"
 	EnvVerifyToken            = "META_INSTAGRAM_VERIFY_TOKEN"
 	EnvInstagramEnabled       = "FEATURE_INSTAGRAM_ENABLED"
 	EnvInstagramTenantAllow   = "FEATURE_INSTAGRAM_TENANTS"
@@ -53,15 +70,15 @@ type Config struct {
 
 // ConfigFromEnv reads runtime configuration from getenv. Returns a
 // typed error when a required secret is missing so cmd/server can log
-// "Instagram disabled — META_APP_SECRET missing" and skip the wire
-// without crashing.
+// "Instagram disabled — META_INSTAGRAM_APP_SECRET missing" and skip the
+// wire without crashing.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	if getenv == nil {
 		return Config{}, errors.New("instagram: getenv is nil")
 	}
-	secret := strings.TrimSpace(getenv(EnvAppSecret))
+	secret := strings.TrimSpace(getenv(EnvInstagramAppSecret))
 	if secret == "" {
-		return Config{}, errors.New("instagram: " + EnvAppSecret + " is empty")
+		return Config{}, errors.New("instagram: " + EnvInstagramAppSecret + " is empty")
 	}
 	verify := strings.TrimSpace(getenv(EnvVerifyToken))
 	if verify == "" {
