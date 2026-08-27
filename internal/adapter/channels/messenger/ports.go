@@ -46,6 +46,17 @@ type MediaScanPublisher interface {
 	PublishScanRequest(ctx context.Context, tenantID, messageID uuid.UUID, key string) error
 }
 
+// ProfileFetcher resolves a PSID's display name via the Graph API
+// (Messenger's messaging[] webhook payload carries only the sender's
+// scoped id, unlike WhatsApp's webhook which includes the name inline).
+// Optional: a nil fetcher leaves SenderDisplayName empty, the pre-fix
+// behaviour, so an unconfigured deployment keeps working exactly as
+// before. A fetch error is logged and swallowed by the handler — it
+// never blocks or fails message delivery.
+type ProfileFetcher interface {
+	FetchDisplayName(ctx context.Context, psid string) (string, error)
+}
+
 // Clock decouples time.Now from the timestamp-window check so unit
 // tests can pin "now" without sleeping. Production uses systemClock.
 type Clock interface {

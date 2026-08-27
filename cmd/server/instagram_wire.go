@@ -39,6 +39,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	goredis "github.com/redis/go-redis/v9"
 
+	channelinstagram "github.com/pericles-luz/crm/internal/adapter/channel/instagram"
 	"github.com/pericles-luz/crm/internal/adapter/channels/instagram"
 	pgpool "github.com/pericles-luz/crm/internal/adapter/db/postgres"
 	pgcontacts "github.com/pericles-luz/crm/internal/adapter/db/postgres/contacts"
@@ -177,6 +178,28 @@ func assembleInstagramAdapter(ctx context.Context, cfg instagram.Config, pool *p
 	opts := []instagram.Option{instagram.WithLogger(slog.Default())}
 	if mediaPub != nil {
 		opts = append(opts, instagram.WithMediaScanPublisher(mediaPub))
+	}
+	// Contact display-name resolution: Instagram's messaging[] webhook
+	// carries only the sender's IGSID, no name (unlike WhatsApp's webhook,
+	// which includes it inline) — see internal/adapter/channels/instagram's
+	// ProfileFetcher doc comment. Resolves the same per-tenant OAuth token
+	// (with global fallback) the outbound sender uses in
+	// instagram_outbound_wire.go's TenantConfigLookup.
+	tokenStore := pgstore.NewInstagramOAuthTokenStore(pool)
+	tokenLookup := channelinstagram.TokenLookup(func(ctx context.Context, tenantID uuid.UUID) (string, error) {
+		accessToken, _, ok, err := tokenStore.Get(ctx, tenantID)
+		if err != nil {
+			return "", err
+		}
+		if ok && accessToken != "" {
+			return accessToken, nil
+		}
+		return instagramOutboundGraphToken(getenv), nil
+	})
+	if profileFetcher, err := channelinstagram.NewProfileFetcher(tokenLookup); err != nil {
+		slog.Default().Warn("instagram wire: profile fetcher disabled", "err", err)
+	} else {
+		opts = append(opts, instagram.WithProfileFetcher(profileFetcher))
 	}
 
 	adapter, err := instagram.New(cfg, receiver, resolver, flag, rl, opts...)
