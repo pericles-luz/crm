@@ -47,6 +47,7 @@ var templateFuncs = mergeIconFuncs(template.FuncMap{
 	"avatarInitial":    avatarInitial,
 	"initials":         initials,
 	"livePoll":         newLivePollData,
+	"listLivePoll":     newListLivePollData,
 	"composeView":      newComposeView,
 })
 
@@ -57,6 +58,16 @@ var templateFuncs = mergeIconFuncs(template.FuncMap{
 // id. Exposed to the templates as {{livePoll .ConversationID .Cursor}}.
 func newLivePollData(conversationID uuid.UUID, cursor string) threadLivePollData {
 	return threadLivePollData{ConversationID: conversationID, Cursor: cursor}
+}
+
+// newListLivePollData builds the conversation-list live-refresh sentinel
+// data from the active filters + open-conversation id + cursor, so
+// inboxListRegionTmpl can render the shared list_live_poll partial
+// inline. OOB is always false here — the initial render swaps the
+// sentinel into place by document position, not by id. Exposed to the
+// templates as {{listLivePoll .Filters .ActiveID .ListPollCursor}}.
+func newListLivePollData(filters inboxFilter, activeID uuid.UUID, cursor int64) listLivePollData {
+	return listLivePollData{Filters: filters, ActiveID: activeID, Cursor: cursor}
 }
 
 // composeView drives the conversation_compose region (SIN-65473): the
@@ -384,9 +395,16 @@ var inboxLayoutTmpl = func() *template.Template {
 // inline on* handlers (CSP of SIN-63977). When OOB is true the wrapper
 // carries hx-swap-oob="true" so HTMX patches it in place from the
 // conversation-view response without disturbing the conversation pane.
+//
+// When ShowListPoll is set the wrapper also embeds the list_live_poll
+// sentinel (the conversation-list counterpart to conversationViewTmpl's
+// thread_live_poll): a hidden element polling GET /inbox/list/since so a
+// message arriving on a conversation OTHER than the one currently open
+// still reorders/refreshes this list without a manual reload.
 var inboxListRegionTmpl = template.Must(template.New("inbox_list_region").Funcs(templateFuncs).Parse(`<div id="conversation-list-region" class="inbox-list-region"{{if .OOB}} hx-swap-oob="true"{{end}}>
 {{template "inbox_filters" .}}
 {{template "conversation_list" .}}
+{{if .ShowListPoll}}{{template "list_live_poll" (listLivePoll .Filters .ActiveID .ListPollCursor)}}{{end}}
 </div>
 `))
 
@@ -467,7 +485,7 @@ var inboxFiltersTmpl = template.Must(template.New("inbox_filters").Funcs(templat
 // slug in the AOM (kept verbatim for the SIN-62919 regression test that
 // scans for the literal class+text combination); the visible channel
 // label is aria-hidden so the channel is not announced twice.
-var conversationListTmpl = template.Must(template.New("conversation_list").Funcs(templateFuncs).Parse(`<ul class="conversation-list" id="conversation-list" role="list">
+var conversationListTmpl = template.Must(template.New("conversation_list").Funcs(templateFuncs).Parse(`<ul class="conversation-list" id="conversation-list" role="list"{{if .ItemsOOB}} hx-swap-oob="true"{{end}}>
   {{range .Items}}
   <li class="conversation-list__item" role="listitem">
     <a href="/inbox/conversations/{{.ID}}{{$.FilterQuery}}"
@@ -983,6 +1001,37 @@ var threadLivePollTmpl = template.Must(template.New("thread_live_poll").Funcs(te
 var threadLiveUpdateTmpl = template.Must(template.New("thread_live_update").Funcs(templateFuncs).Parse(
 	`{{template "thread_live_poll" .Poll}}<ol hx-swap-oob="beforeend:#conversation-thread">{{range .Messages}}{{template "message_bubble" .}}{{end}}</ol>`))
 
+// listLivePollTmpl is the conversation-list live-refresh sentinel: a
+// hidden element that polls GET /inbox/list/since every 5s through an
+// exclusive cursor (the max LastMessageAt, as Unix nanoseconds, among the
+// currently rendered rows) plus the active filters and the currently
+// open conversation id (so a background refresh still marks the right
+// row Active). It is the single source of truth for the sentinel,
+// rendered in two places that MUST stay identical:
+//
+//   - inside inboxListRegionTmpl (initial in-place render, OOB=false),
+//     regenerated on every full /inbox render and every filter swap, and
+//   - as the listSince handler's main (non-OOB) swap content, replacing
+//     the old sentinel via its own hx-swap="outerHTML" (OOB=false).
+//
+// hx-target="this" + hx-swap="outerHTML" make the poll replace itself
+// with the fresh sentinel the listSince response carries; a 204
+// no-change response leaves it untouched so it keeps polling.
+// .list-live-poll is display:none in inbox.css.
+var listLivePollTmpl = template.Must(template.New("list_live_poll").Funcs(templateFuncs).Parse(
+	`<div id="list-live-poll" class="list-live-poll" aria-hidden="true"{{if .OOB}} hx-swap-oob="true"{{end}}` +
+		` hx-get="/inbox/list/since?after={{.Cursor}}&active={{.ActiveID}}&state={{.Filters.State}}&channel={{.Filters.Channel}}&assigned={{.Filters.AssignedParam}}&channel_id={{.Filters.ChannelID}}"` +
+		` hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML"></div>`))
+
+// listLiveUpdateTmpl is the listSince handler's 200 response: the fresh
+// sentinel (advanced cursor, replacing the old one in place) followed by
+// the conversation list re-rendered with ItemsOOB=true, so htmx swaps
+// the whole <ul id="conversation-list"> by id — order, snippets, and
+// badges all reflect what changed — without touching anything else in
+// the list region (filter bar, open thread).
+var listLiveUpdateTmpl = template.Must(template.New("list_live_update").Funcs(templateFuncs).Parse(
+	`{{template "list_live_poll" .Poll}}{{template "conversation_list" .Region}}`))
+
 // composeTextareaTmpl is the single source of truth for the outbound
 // compose <textarea>. It renders in two places that MUST stay identical:
 //
@@ -1007,7 +1056,7 @@ func init() {
 	// {{template "conversation_list" …}} and so on with one template
 	// tree. Errors here are programmer errors (typos in the template
 	// source) — surface them at process start, not at request time.
-	for _, child := range []*template.Template{inboxListRegionTmpl, inboxFiltersTmpl, conversationListTmpl, conversationViewTmpl, conversationThreadTmpl, messageBubbleTmpl, customerPanelTmpl, channelBadgeTmpl, conversationContextTmpl, conversationAssignmentTmpl, conversationComposeTmpl, conversationStateActionTmpl, composeTextareaTmpl} {
+	for _, child := range []*template.Template{inboxListRegionTmpl, inboxFiltersTmpl, conversationListTmpl, conversationViewTmpl, conversationThreadTmpl, messageBubbleTmpl, customerPanelTmpl, channelBadgeTmpl, conversationContextTmpl, conversationAssignmentTmpl, conversationComposeTmpl, conversationStateActionTmpl, composeTextareaTmpl, listLivePollTmpl} {
 		if _, err := inboxLayoutTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
 			panic("inbox/web: register " + child.Name() + ": " + err.Error())
 		}
@@ -1015,7 +1064,7 @@ func init() {
 	// inboxListRegionTmpl is executed standalone for HTMX partial swaps
 	// (filter changes) and OOB refreshes (row activation), so it needs the
 	// filter + list + badge partials registered on its own tree.
-	for _, child := range []*template.Template{inboxFiltersTmpl, conversationListTmpl, channelBadgeTmpl} {
+	for _, child := range []*template.Template{inboxFiltersTmpl, conversationListTmpl, channelBadgeTmpl, listLivePollTmpl} {
 		if _, err := inboxListRegionTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
 			panic("inbox/web: register " + child.Name() + " in list region: " + err.Error())
 		}
@@ -1039,6 +1088,15 @@ func init() {
 	for _, child := range []*template.Template{threadLivePollTmpl, messageBubbleTmpl} {
 		if _, err := threadLiveUpdateTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
 			panic("inbox/web: register " + child.Name() + " in thread live update: " + err.Error())
+		}
+	}
+	// listLiveUpdateTmpl is executed standalone by the listSince handler:
+	// it embeds the sentinel + the freshly rendered <ul> of rows, plus the
+	// channel badge conversation_list itself depends on, so it needs all
+	// three registered on its own tree.
+	for _, child := range []*template.Template{listLivePollTmpl, conversationListTmpl, channelBadgeTmpl} {
+		if _, err := listLiveUpdateTmpl.AddParseTree(child.Name(), child.Tree); err != nil {
+			panic("inbox/web: register " + child.Name() + " in list live update: " + err.Error())
 		}
 	}
 	// conversationThreadTmpl is executed standalone by the reset handler
@@ -1074,6 +1132,8 @@ func init() {
 		conversationThreadTmpl,
 		threadLivePollTmpl,
 		threadLiveUpdateTmpl,
+		listLivePollTmpl,
+		listLiveUpdateTmpl,
 		composeTextareaTmpl,
 		conversationListTmpl,
 		inboxFiltersTmpl,
