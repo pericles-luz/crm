@@ -124,8 +124,10 @@ func (k *integrationKit) postSigned(body []byte) int {
 
 // igEnvelope builds an Instagram Messaging webhook payload — entry[].messaging[]
 // shape — with one inbound text message addressed to testIGBusinessID at
-// the harness's pinned clock. timestamp on the inner messaging block is
-// unix-millis (Meta convention); entry.time is unix-seconds.
+// the harness's pinned clock. Both the inner messaging block's timestamp
+// AND entry.time are unix-millis — confirmed against a real production
+// payload (2026-08-27); entry.time is NOT unix-seconds despite the
+// classic Messenger Platform convention this shape was modeled on.
 func (k *integrationKit) igEnvelope(mid, igsid, text string) []byte {
 	k.t.Helper()
 	now := k.clock.Now()
@@ -139,7 +141,7 @@ func (k *integrationKit) igEnvelope(mid, igsid, text string) []byte {
 		"object": "instagram",
 		"entry": []map[string]any{{
 			"id":        testIGBusinessID,
-			"time":      now.Unix(),
+			"time":      now.UnixMilli(),
 			"messaging": []map[string]any{msg},
 		}},
 	}
