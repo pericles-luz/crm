@@ -41,6 +41,17 @@ type MediaScanPublisher interface {
 	PublishScanRequest(ctx context.Context, tenantID, messageID uuid.UUID, key string) error
 }
 
+// ProfileFetcher resolves an IGSID's display name via the Graph API
+// (Instagram's messaging[] webhook payload carries only the sender's
+// scoped id, unlike WhatsApp's webhook which includes the name inline).
+// Optional: a nil fetcher leaves SenderDisplayName empty, the pre-fix
+// behaviour, so an unconfigured deployment keeps working exactly as
+// before. A fetch error is logged and swallowed by the handler — it
+// never blocks or fails message delivery.
+type ProfileFetcher interface {
+	FetchDisplayName(ctx context.Context, tenantID uuid.UUID, igsid string) (string, error)
+}
+
 // Clock decouples time.Now from the timestamp-window and 24h outbound
 // window checks so unit tests can pin "now" without sleeping.
 type Clock interface {
