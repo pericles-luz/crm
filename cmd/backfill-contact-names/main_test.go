@@ -17,23 +17,52 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// fullEnv returns a getenv stub with both required DSNs set, so tests
+// that only care about flag parsing don't need to repeat the DSN
+// boilerplate.
+func fullEnv() func(string) string {
+	return func(k string) string {
+		switch k {
+		case "MASTER_OPS_DATABASE_URL":
+			return "postgres://master"
+		case "DATABASE_URL":
+			return "postgres://runtime"
+		}
+		return ""
+	}
+}
+
 func TestLoadConfig_RequiresMasterOpsDSN(t *testing.T) {
 	t.Parallel()
-	_, err := loadConfig(nil, func(string) string { return "" })
+	getenv := func(k string) string {
+		if k == "DATABASE_URL" {
+			return "postgres://runtime"
+		}
+		return ""
+	}
+	_, err := loadConfig(nil, getenv)
 	if err == nil {
 		t.Fatal("expected error when MASTER_OPS_DATABASE_URL is unset")
 	}
 }
 
-func TestLoadConfig_Defaults(t *testing.T) {
+func TestLoadConfig_RequiresDatabaseURL(t *testing.T) {
 	t.Parallel()
 	getenv := func(k string) string {
 		if k == "MASTER_OPS_DATABASE_URL" {
-			return "postgres://x"
+			return "postgres://master"
 		}
 		return ""
 	}
-	cfg, err := loadConfig(nil, getenv)
+	_, err := loadConfig(nil, getenv)
+	if err == nil {
+		t.Fatal("expected error when DATABASE_URL is unset")
+	}
+}
+
+func TestLoadConfig_Defaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := loadConfig(nil, fullEnv())
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
@@ -56,16 +85,10 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 func TestLoadConfig_ParsesFlags(t *testing.T) {
 	t.Parallel()
-	getenv := func(k string) string {
-		if k == "MASTER_OPS_DATABASE_URL" {
-			return "postgres://x"
-		}
-		return ""
-	}
 	tenantID := uuid.New()
 	cfg, err := loadConfig([]string{
 		"-apply", "-tenant", tenantID.String(), "-channel", "instagram", "-limit", "5", "-delay", "50ms",
-	}, getenv)
+	}, fullEnv())
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}

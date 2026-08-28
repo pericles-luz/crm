@@ -24,7 +24,18 @@
 //
 //	MASTER_OPS_DATABASE_URL   mandatory — app_master_ops DSN (the same
 //	                          env var every other cmd/server master-ops
-//	                          consumer reads).
+//	                          consumer reads). Used for the
+//	                          contact/contact_channel_identity scan+update
+//	                          (internal/adapter/db/postgres/contactbackfill).
+//	DATABASE_URL              mandatory — app_runtime DSN. Used ONLY to
+//	                          read instagram_oauth_tokens: that table
+//	                          grants SELECT to app_runtime, not
+//	                          app_master_ops (it has no RLS — "composition
+//	                          root/admin-flow config, not tenant runtime
+//	                          data", per its own doc comment), so it must
+//	                          be read the same way
+//	                          cmd/server/instagram_outbound_wire.go reads
+//	                          it — NOT through the master-ops pool.
 //	META_MESSENGER_GRAPH_TOKEN / META_GRAPH_TOKEN   Messenger token,
 //	                          same fallback precedence as
 //	                          cmd/server/messenger_wire.go. Messenger
@@ -74,17 +85,18 @@ func main() {
 // unit tests can drive every flag-parsing path without touching a real
 // database.
 type config struct {
-	masterDSN string
-	apply     bool
-	tenant    uuid.UUID // uuid.Nil means every tenant
-	channel   string    // "" means both messenger and instagram
-	limit     int
-	delay     time.Duration
+	masterDSN  string
+	runtimeDSN string
+	apply      bool
+	tenant     uuid.UUID // uuid.Nil means every tenant
+	channel    string    // "" means both messenger and instagram
+	limit      int
+	delay      time.Duration
 }
 
 // loadConfig parses args (excluding argv[0]) and reads MASTER_OPS_DATABASE_URL
-// from getenv. Returns a descriptive error so a misconfigured run
-// surfaces with the exact knob name.
+// and DATABASE_URL from getenv. Returns a descriptive error so a
+// misconfigured run surfaces with the exact knob name.
 func loadConfig(args []string, getenv func(string) string) (config, error) {
 	fs := flag.NewFlagSet("backfill-contact-names", flag.ContinueOnError)
 	apply := fs.Bool("apply", false, "write resolved names to the database (default: dry-run report only)")
@@ -114,14 +126,19 @@ func loadConfig(args []string, getenv func(string) string) (config, error) {
 	if dsn == "" {
 		return config{}, errors.New("MASTER_OPS_DATABASE_URL is required")
 	}
+	runtimeDSN := strings.TrimSpace(getenv("DATABASE_URL"))
+	if runtimeDSN == "" {
+		return config{}, errors.New("DATABASE_URL is required")
+	}
 
 	return config{
-		masterDSN: dsn,
-		apply:     *apply,
-		tenant:    tenantID,
-		channel:   *channel,
-		limit:     *limit,
-		delay:     *delay,
+		masterDSN:  dsn,
+		runtimeDSN: runtimeDSN,
+		apply:      *apply,
+		tenant:     tenantID,
+		channel:    *channel,
+		limit:      *limit,
+		delay:      *delay,
 	}, nil
 }
 
@@ -131,6 +148,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, getenv func(strin
 		return fmt.Errorf("pgxpool.New master: %w", err)
 	}
 	defer masterPool.Close()
+
+	runtimePool, err := pgxpool.New(ctx, cfg.runtimeDSN)
+	if err != nil {
+		return fmt.Errorf("pgxpool.New runtime: %w", err)
+	}
+	defer runtimePool.Close()
 
 	store, err := contactbackfill.New(masterPool)
 	if err != nil {
@@ -149,7 +172,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, getenv func(strin
 		logger.Warn("backfill-contact-names: messenger fetcher disabled (no META_MESSENGER_GRAPH_TOKEN / META_GRAPH_TOKEN) — messenger candidates will be skipped")
 	}
 
-	tokenStore := pgstore.NewInstagramOAuthTokenStore(masterPool)
+	// instagram_oauth_tokens has no RLS and grants SELECT to app_runtime
+	// only (not app_master_ops — see the file doc comment), so it MUST be
+	// read through the runtime pool, mirroring
+	// cmd/server/instagram_outbound_wire.go exactly.
+	tokenStore := pgstore.NewInstagramOAuthTokenStore(runtimePool)
 	igLookup := channelinstagram.TokenLookup(func(ctx context.Context, tenantID uuid.UUID) (string, error) {
 		accessToken, _, ok, err := tokenStore.Get(ctx, tenantID)
 		if err != nil {
