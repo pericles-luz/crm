@@ -166,13 +166,27 @@ func assembleMessengerAdapter(ctx context.Context, cfg messenger.Config, pool *p
 	// statuses[] array.
 	statusUpdater := inboxusecase.MustNewUpdateMessageStatus(inboxStore, inboxStore)
 
-	inboundAdapter, err := messenger.New(cfg, receiver, resolver, flag,
+	opts := []messenger.Option{
 		messenger.WithLogger(slog.Default()),
 		messenger.WithStatusUpdater(statusUpdater),
 		messenger.WithReadReceiptLookup(contactsStore, inboxStore),
 		// MediaScanPublisher wired in a follow-up PR that lands the
 		// NATS-backed publisher in cmd/server.
-	)
+	}
+	// Contact display-name resolution: Messenger's messaging[] webhook
+	// carries only the sender's PSID, no name (unlike WhatsApp's webhook,
+	// which includes it inline) — see internal/adapter/channels/messenger's
+	// ProfileFetcher doc comment. Reuses the exact same token the outbound
+	// sender resolves; unconfigured (no token) keeps the pre-fix behaviour
+	// (empty SenderDisplayName) rather than disabling the whole adapter.
+	if token := messengerOutboundGraphToken(getenv); token != "" {
+		if fetcher, err := channelmessenger.NewProfileFetcher(token); err != nil {
+			slog.Default().Warn("messenger wire: profile fetcher disabled", "err", err)
+		} else {
+			opts = append(opts, messenger.WithProfileFetcher(fetcher))
+		}
+	}
+	inboundAdapter, err := messenger.New(cfg, receiver, resolver, flag, opts...)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -25,7 +25,7 @@ func TestBuildInstagramWiring_DisabledWhenSecretMissing(t *testing.T) {
 func TestBuildInstagramWiring_DisabledWhenVerifyTokenMissing(t *testing.T) {
 	t.Parallel()
 	got := buildInstagramWiring(context.Background(), func(k string) string {
-		if k == instagram.EnvAppSecret {
+		if k == instagram.EnvInstagramAppSecret {
 			return "s"
 		}
 		return ""
@@ -39,7 +39,7 @@ func TestBuildInstagramWiring_DisabledWhenDSNMissing(t *testing.T) {
 	t.Parallel()
 	got := buildInstagramWiring(context.Background(), func(k string) string {
 		switch k {
-		case instagram.EnvAppSecret:
+		case instagram.EnvInstagramAppSecret:
 			return "s"
 		case instagram.EnvVerifyToken:
 			return "v"
@@ -55,7 +55,7 @@ func TestBuildInstagramWiring_DisabledWhenRedisMissing(t *testing.T) {
 	t.Parallel()
 	got := buildInstagramWiring(context.Background(), func(k string) string {
 		switch k {
-		case instagram.EnvAppSecret:
+		case instagram.EnvInstagramAppSecret:
 			return "s"
 		case instagram.EnvVerifyToken:
 			return "v"

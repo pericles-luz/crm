@@ -42,7 +42,7 @@ import (
 // Unlike the pre-Business-Login-OAuth design, an empty
 // META_INSTAGRAM_GRAPH_TOKEN no longer disables the sender outright as
 // long as Business Login for Instagram is configured (META_INSTAGRAM_APP_ID
-// + META_APP_SECRET, see cmd/server/instagram_oauth_wire.go): a tenant
+// + META_INSTAGRAM_APP_SECRET, see cmd/server/instagram_oauth_wire.go): a tenant
 // that connects via /settings/channels' "Conectar Instagram" supplies its
 // own TenantConfig.AccessToken, resolved per-send by
 // channelinstagram.Sender, and the global token becomes a legacy
@@ -112,8 +112,8 @@ const envInstagramGraphToken = "META_INSTAGRAM_GRAPH_TOKEN"
 
 // envInstagramAppID is the Meta App's OAuth client_id for Business Login
 // for Instagram (see cmd/server/instagram_oauth_wire.go). Shared with
-// instagram.EnvAppSecret ("META_APP_SECRET", already used for webhook
-// signature verification) as the two preconditions for
+// instagram.EnvInstagramAppSecret ("META_INSTAGRAM_APP_SECRET", already
+// used for webhook signature verification) as the two preconditions for
 // buildInstagramOutboundEntry to construct the sender when no global
 // fallback token is set.
 const envInstagramAppID = "META_INSTAGRAM_APP_ID"
@@ -133,7 +133,7 @@ func instagramOutboundGraphToken(getenv func(string) string) string {
 // in the test binary would panic (see the file doc comment).
 func instagramOutboundSenderDisabled(getenv func(string) string) bool {
 	token := instagramOutboundGraphToken(getenv)
-	oauthConfigured := strings.TrimSpace(getenv(envInstagramAppID)) != "" && strings.TrimSpace(getenv(instagram.EnvAppSecret)) != ""
+	oauthConfigured := strings.TrimSpace(getenv(envInstagramAppID)) != "" && strings.TrimSpace(getenv(instagram.EnvInstagramAppSecret)) != ""
 	return token == "" && !oauthConfigured
 }
 

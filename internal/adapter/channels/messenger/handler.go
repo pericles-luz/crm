@@ -223,6 +223,7 @@ func (a *Adapter) deliverMessage(ctx context.Context, tenantID uuid.UUID, pageID
 		Channel:           Channel,
 		ChannelExternalID: mid,
 		SenderExternalID:  psid,
+		SenderDisplayName: a.fetchDisplayName(ctx, tenantID, mid, psid),
 		Body:              extractBody(m.Message),
 		OccurredAt:        msToTime(m.Timestamp),
 		HasAttachments:    len(m.Message.Attachments) > 0,
@@ -250,6 +251,36 @@ func (a *Adapter) deliverMessage(ctx context.Context, tenantID uuid.UUID, pageID
 		slog.String("mid", mid),
 		slog.String("message_id", res.MessageID.String()))
 	a.requestMediaScans(ctx, tenantID, res.MessageID, mid, m.Message.Attachments)
+}
+
+// profileFetchTimeout bounds fetchDisplayName independently of
+// cfg.DeliverTimeout (which scopes the DB transaction) — a slow Graph
+// call must never eat into or extend the delivery budget.
+const profileFetchTimeout = 3 * time.Second
+
+// fetchDisplayName resolves psid's display name via the optional
+// ProfileFetcher, or "" when unwired or on any error. Messenger's
+// messaging[] webhook carries only the sender's scoped id — no name —
+// unlike WhatsApp's webhook, which includes it inline; this is the
+// follow-up Graph call that closes that gap for new contacts. A failure
+// here is logged at debug and never blocks or fails delivery: the
+// message still persists with an empty name, exactly like before this
+// fetcher existed.
+func (a *Adapter) fetchDisplayName(ctx context.Context, tenantID uuid.UUID, mid, psid string) string {
+	if a.profile == nil {
+		return ""
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, profileFetchTimeout)
+	defer cancel()
+	name, err := a.profile.FetchDisplayName(fetchCtx, psid)
+	if err != nil {
+		a.logger.Debug("messenger.profile_fetch_failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("mid", mid),
+			slog.String("err", err.Error()))
+		return ""
+	}
+	return name
 }
 
 // requestMediaScans publishes one media.scan.requested envelope per

@@ -36,7 +36,12 @@ type igEnvelope struct {
 }
 
 type igEntry struct {
-	ID        string        `json:"id"` // ig business account id (the recipient)
+	ID string `json:"id"` // ig business account id (the recipient)
+	// Time is unix MILLISECONDS, confirmed against a real production
+	// payload (2026-08-27) — the "Instagram API with Instagram Login"
+	// webhook generation does not follow the classic Messenger Platform
+	// convention of whole seconds this field's shape was modeled on.
+	// timestampWindowDirection parses it with time.UnixMilli accordingly.
 	Time      int64         `json:"time"`
 	Messaging []igMessaging `json:"messaging"`
 }
@@ -205,6 +210,7 @@ func (a *Adapter) deliverMessage(ctx context.Context, tenantID uuid.UUID, igBusi
 		Channel:           Channel,
 		ChannelExternalID: mid,
 		SenderExternalID:  igsid,
+		SenderDisplayName: a.fetchDisplayName(ctx, tenantID, mid, igsid),
 		Body:              extractBody(m.Message),
 		OccurredAt:        parseMillis(m.Timestamp),
 		HasAttachments:    len(m.Message.Attachments) > 0,
@@ -231,6 +237,36 @@ func (a *Adapter) deliverMessage(ctx context.Context, tenantID uuid.UUID, igBusi
 		slog.String("ig_business_id", igBusinessID),
 		slog.String("mid", mid))
 	a.requestMediaScans(ctx, tenantID, res.MessageID, mid, m.Message.Attachments)
+}
+
+// profileFetchTimeout bounds fetchDisplayName independently of
+// cfg.DeliverTimeout (which scopes the DB transaction) — a slow Graph
+// call must never eat into or extend the delivery budget.
+const profileFetchTimeout = 3 * time.Second
+
+// fetchDisplayName resolves igsid's display name via the optional
+// ProfileFetcher, or "" when unwired or on any error. Instagram's
+// messaging[] webhook carries only the sender's scoped id — no name —
+// unlike WhatsApp's webhook, which includes it inline; this is the
+// follow-up Graph call that closes that gap for new contacts. A failure
+// here is logged at debug and never blocks or fails delivery: the
+// message still persists with an empty name, exactly like before this
+// fetcher existed.
+func (a *Adapter) fetchDisplayName(ctx context.Context, tenantID uuid.UUID, mid, igsid string) string {
+	if a.profile == nil {
+		return ""
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, profileFetchTimeout)
+	defer cancel()
+	name, err := a.profile.FetchDisplayName(fetchCtx, tenantID, igsid)
+	if err != nil {
+		a.logger.Debug("instagram.profile_fetch_failed",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("mid", mid),
+			slog.String("err", err.Error()))
+		return ""
+	}
+	return name
 }
 
 // requestMediaScans publishes one media.scan.requested envelope per
@@ -282,8 +318,12 @@ func (a *Adapter) requestMediaScans(ctx context.Context, tenantID, messageID uui
 
 // timestampWindowDirection returns "" when every entry[].time falls
 // inside [now-PastWindow, now+FutureSkew], or the direction label
-// ("past" / "future") of the first breach. Meta sets entry[].time in
-// unix seconds.
+// ("past" / "future") of the first breach. entry[].time is unix
+// MILLISECONDS (see igEntry.Time's doc comment) — confirmed against a
+// real production payload; treating it as seconds (the classic
+// Messenger Platform convention this was originally modeled on) made
+// every real delivery compute to a timestamp ~56000 years in the
+// future and drop every single inbound message.
 func (a *Adapter) timestampWindowDirection(env *igEnvelope, now time.Time) string {
 	if env == nil || len(env.Entry) == 0 {
 		return ""
@@ -294,7 +334,7 @@ func (a *Adapter) timestampWindowDirection(env *igEnvelope, now time.Time) strin
 		if e.Time <= 0 {
 			continue
 		}
-		ts := time.Unix(e.Time, 0).UTC()
+		ts := time.UnixMilli(e.Time).UTC()
 		if ts.Before(pastBound) {
 			return "past"
 		}

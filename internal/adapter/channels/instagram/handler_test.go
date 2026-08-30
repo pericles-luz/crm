@@ -115,7 +115,7 @@ func TestHandlePost_DeliversValidMessage(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	now := d.clock.Now()
-	ts := now.Unix()
+	ts := now.UnixMilli()
 	body := buildEnvelope("igb-1", ts, msgInbound("igsid-1", "mid-1", "hello", now.UnixMilli(), nil))
 
 	resp := postSigned(t, a, body)
@@ -150,7 +150,7 @@ func TestHandlePost_DeliversValidMessage(t *testing.T) {
 func TestHandlePost_BadSignatureReturns401(t *testing.T) {
 	t.Parallel()
 	a, _ := newAdapter(t)
-	body := buildEnvelope("igb-1", time.Now().Unix(), msgInbound("u", "m", "hi", time.Now().UnixMilli(), nil))
+	body := buildEnvelope("igb-1", time.Now().UnixMilli(), msgInbound("u", "m", "hi", time.Now().UnixMilli(), nil))
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/instagram", strings.NewReader(string(body)))
 	req.Header.Set(instagram.SignatureHeader, "sha256=deadbeef")
 	rr := httptest.NewRecorder()
@@ -165,7 +165,7 @@ func TestHandlePost_BadSignatureReturns401(t *testing.T) {
 func TestHandlePost_MissingSignatureReturns401(t *testing.T) {
 	t.Parallel()
 	a, _ := newAdapter(t)
-	body := buildEnvelope("igb-1", time.Now().Unix(), msgInbound("u", "m", "hi", time.Now().UnixMilli(), nil))
+	body := buildEnvelope("igb-1", time.Now().UnixMilli(), msgInbound("u", "m", "hi", time.Now().UnixMilli(), nil))
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/instagram", strings.NewReader(string(body)))
 	// no signature header
 	rr := httptest.NewRecorder()
@@ -193,7 +193,7 @@ func TestHandlePost_MalformedJSONReturns200Drop(t *testing.T) {
 func TestHandlePost_UnknownIGBusinessIDIsSilentDrop(t *testing.T) {
 	t.Parallel()
 	a, d := newAdapter(t)
-	body := buildEnvelope("ghost", d.clock.Now().Unix(),
+	body := buildEnvelope("ghost", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	resp := postSigned(t, a, body)
 	if resp.Code != http.StatusOK {
@@ -210,7 +210,7 @@ func TestHandlePost_FeatureFlagOffSkipsDelivery(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	d.flag.Set(tenantID, false)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	resp := postSigned(t, a, body)
 	if resp.Code != http.StatusOK {
@@ -226,9 +226,9 @@ func TestHandlePost_RateLimitedSkipsDelivery(t *testing.T) {
 	a, d := newAdapter(t, withRateLimit(1))
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
-	body1 := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body1 := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m1", "hi", d.clock.Now().UnixMilli(), nil))
-	body2 := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body2 := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m2", "hi2", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body1)
 	resp := postSigned(t, a, body2)
@@ -245,7 +245,7 @@ func TestHandlePost_DuplicateMIDReturnsSuccess(t *testing.T) {
 	a, d := newAdapter(t)
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "dup-mid", "hi", d.clock.Now().UnixMilli(), nil))
 
 	postSigned(t, a, body)
@@ -271,7 +271,7 @@ func TestHandlePost_EchoMessagesAreDropped(t *testing.T) {
 			"is_echo": true,
 		},
 	}
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(), echo)
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(), echo)
 	postSigned(t, a, body)
 	if d.inbox.Calls() != 0 {
 		t.Errorf("inbox calls on echo: got %d, want 0", d.inbox.Calls())
@@ -287,7 +287,7 @@ func TestHandlePost_AttachmentsTriggerMediaScan(t *testing.T) {
 		{"type": "image", "payload": map[string]string{"url": "https://cdn.example/x.jpg"}},
 		{"type": "video", "payload": map[string]string{"url": "https://cdn.example/x.mp4"}},
 	}
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "mid-att", "", d.clock.Now().UnixMilli(), att))
 	postSigned(t, a, body)
 	calls := d.media.Calls()
@@ -324,7 +324,7 @@ func TestHandlePost_TimestampOutsideWindowIsDropped(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	// time entry is 2 days old; PastWindow is 24h, so this drops.
-	old := d.clock.Now().Add(-48 * time.Hour).Unix()
+	old := d.clock.Now().Add(-48 * time.Hour).UnixMilli()
 	body := buildEnvelope("igb-1", old,
 		msgInbound("u", "stale", "hi", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body)
@@ -333,12 +333,38 @@ func TestHandlePost_TimestampOutsideWindowIsDropped(t *testing.T) {
 	}
 }
 
+// TestHandlePost_RealProductionEntryTimeIsAccepted pins the real bug
+// found in production on 2026-08-27: the first live Instagram webhook
+// ever delivered (after the app finally went Live) carried
+// entry[].time=1787828806928 — that is unix MILLISECONDS (13 digits),
+// not seconds. Treating it as seconds computed a timestamp ~56000 years
+// in the future and dropped the message as
+// instagram.timestamp_outside_window direction=future. This test
+// freezes the clock at the real wall-clock instant the payload actually
+// arrived (entry_time_raw=1787828806928, now_unix=1787828808) and
+// asserts delivery succeeds — regressing the seconds-vs-milliseconds
+// mixup would immediately fail this test.
+func TestHandlePost_RealProductionEntryTimeIsAccepted(t *testing.T) {
+	t.Parallel()
+	a, d := newAdapter(t)
+	tenantID := uuid.New()
+	d.resolver.Register("igb-1", tenantID)
+	d.clock.Set(time.Unix(1787828808, 0).UTC())
+	const realEntryTimeMillis = 1787828806928
+	body := buildEnvelope("igb-1", realEntryTimeMillis,
+		msgInbound("u", "real-mid", "hi", realEntryTimeMillis, nil))
+	postSigned(t, a, body)
+	if d.inbox.Calls() != 1 {
+		t.Fatalf("inbox calls on real production entry time: got %d, want 1 (message must not be dropped)", d.inbox.Calls())
+	}
+}
+
 func TestHandlePost_MissingMIDIsSkipped(t *testing.T) {
 	t.Parallel()
 	a, d := newAdapter(t)
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "", "hi", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body)
 	if d.inbox.Calls() != 0 {
@@ -351,7 +377,7 @@ func TestHandlePost_MissingSenderIsSkipped(t *testing.T) {
 	a, d := newAdapter(t)
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body)
 	if d.inbox.Calls() != 0 {
@@ -365,7 +391,7 @@ func TestHandlePost_RateLimiterErrorSkipsDelivery(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	d.rate.FailWith(errInjected)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body)
 	if d.inbox.Calls() != 0 {
@@ -379,7 +405,7 @@ func TestHandlePost_FlagErrorSkipsDelivery(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	d.flag.FailWith(errInjected)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body)
 	if d.inbox.Calls() != 0 {
@@ -393,7 +419,7 @@ func TestHandlePost_InboxErrorIsLoggedNot500(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	d.inbox.FailWith(errInjected)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	resp := postSigned(t, a, body)
 	if resp.Code != http.StatusOK {
@@ -423,7 +449,7 @@ func TestHandlePost_AttachmentsWithoutPublisherLogsButPersists(t *testing.T) {
 	tenantID := uuid.New()
 	d.resolver.Register("igb-1", tenantID)
 	att := []map[string]any{{"type": "image", "payload": map[string]string{"url": "u"}}}
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m-att", "", d.clock.Now().UnixMilli(), att))
 	postSigned(t, a, body)
 	if got := len(d.inbox.Persisted()); got != 1 {
@@ -440,7 +466,7 @@ func TestHandlePost_MediaPublisherErrorContinues(t *testing.T) {
 	att := []map[string]any{
 		{"type": "image", "payload": map[string]string{"url": "u1"}},
 	}
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m-att", "", d.clock.Now().UnixMilli(), att))
 	resp := postSigned(t, a, body)
 	if resp.Code != http.StatusOK {
@@ -454,7 +480,7 @@ func TestHandlePost_MediaPublisherErrorContinues(t *testing.T) {
 func TestHandlePost_EmptyMessagingIsNoOp(t *testing.T) {
 	t.Parallel()
 	a, d := newAdapter(t)
-	body := buildEnvelope("igb-1", d.clock.Now().Unix())
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli())
 	resp := postSigned(t, a, body)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", resp.Code)
@@ -467,7 +493,7 @@ func TestHandlePost_EmptyMessagingIsNoOp(t *testing.T) {
 func TestHandlePost_MissingEntryIDIsSkipped(t *testing.T) {
 	t.Parallel()
 	a, d := newAdapter(t)
-	body := buildEnvelope("", d.clock.Now().Unix(),
+	body := buildEnvelope("", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	postSigned(t, a, body)
 	if d.inbox.Calls() != 0 {
@@ -491,7 +517,7 @@ func TestHandlePost_BodyTooLargeIsDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	body := buildEnvelope("igb-1", d.clock.Now().Unix(),
+	body := buildEnvelope("igb-1", d.clock.Now().UnixMilli(),
 		msgInbound("u", "m", "hi", d.clock.Now().UnixMilli(), nil))
 	resp := postSigned(t, a, body)
 	// MaxBytesReader returns 200 (drop, anti-enumeration).

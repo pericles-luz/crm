@@ -11,7 +11,7 @@ import (
 func TestBuildInstagramConnector_NilWhenAppIDMissing(t *testing.T) {
 	t.Parallel()
 	got := buildInstagramConnector(nil, func(k string) string {
-		if k == instagram.EnvAppSecret {
+		if k == instagram.EnvInstagramAppSecret {
 			return "s"
 		}
 		return ""
@@ -40,7 +40,7 @@ func TestBuildInstagramConnector_BuiltWhenConfigured(t *testing.T) {
 		switch k {
 		case envInstagramAppID:
 			return "app123"
-		case instagram.EnvAppSecret:
+		case instagram.EnvInstagramAppSecret:
 			return "s"
 		}
 		return ""

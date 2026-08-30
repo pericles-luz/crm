@@ -22,6 +22,7 @@ type Adapter struct {
 	flag    FeatureFlag
 	rate    RateLimiter
 	media   MediaScanPublisher
+	profile ProfileFetcher
 	clock   Clock
 	logger  *slog.Logger
 }
@@ -56,6 +57,19 @@ func WithMediaScanPublisher(p MediaScanPublisher) Option {
 	return func(a *Adapter) {
 		if p != nil {
 			a.media = p
+		}
+	}
+}
+
+// WithProfileFetcher wires the ProfileFetcher deliverMessage calls to
+// resolve a real display name for an IGSID before creating a new
+// contact. Optional: when nil, SenderDisplayName stays empty — the
+// pre-fix behaviour, so a deployment without a configured token keeps
+// working exactly as before.
+func WithProfileFetcher(p ProfileFetcher) Option {
+	return func(a *Adapter) {
+		if p != nil {
+			a.profile = p
 		}
 	}
 }
