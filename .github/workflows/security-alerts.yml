@@ -78,6 +78,17 @@ jobs:
               fi
               exit 1
             fi
+            # 401 means the token itself is dead (expired or revoked), not a
+            # scope problem. A silently expired PAT failed this job daily from
+            # 2026-09-24 to 2026-11-05 behind the generic message below.
+            if grep -qi "Bad credentials\|HTTP 401" alerts.err; then
+              if [ "${USING_PAT}" = "true" ]; then
+                echo "::error::DEPENDABOT_ALERTS_PAT was rejected with 401 Bad credentials — the token has expired or been revoked. Mint a new fine-grained PAT scoped to ${GITHUB_REPOSITORY} with 'Dependabot alerts: Read' and update the DEPENDABOT_ALERTS_PAT secret (gh secret set DEPENDABOT_ALERTS_PAT -R ${GITHUB_REPOSITORY}). See ADR 0084 §4 (SIN-62247)."
+              else
+                echo "::error::GITHUB_TOKEN was rejected with 401 Bad credentials. Re-run the job; if it persists, check GitHub API status."
+              fi
+              exit 1
+            fi
             echo "::error::Could not list Dependabot alerts (gh api exit ${status}). Check token permissions and API status."
             exit 1
           fi
