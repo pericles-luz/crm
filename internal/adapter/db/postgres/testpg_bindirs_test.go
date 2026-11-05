@@ -1,13 +1,15 @@
-package testpg
+package postgres_test
 
 import (
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/pericles-luz/crm/internal/adapter/db/postgres/testpg"
 )
 
-func TestPgBinSearchPaths_NewestMajorFirst(t *testing.T) {
+func TestPgBinDirs_NewestMajorFirst(t *testing.T) {
 	root := t.TempDir()
 	mk := func(name string, withPgCtl bool) {
 		dir := filepath.Join(root, name, "bin")
@@ -26,27 +28,19 @@ func TestPgBinSearchPaths_NewestMajorFirst(t *testing.T) {
 	mk("17", false)     // no pg_ctl: skipped
 	mk("current", true) // non-numeric: skipped
 
-	old := pgLibRoot
-	pgLibRoot = root
-	t.Cleanup(func() { pgLibRoot = old })
-
-	got := pgBinSearchPaths()
+	got := testpg.PgBinDirs(root)
 	want := []string{
 		filepath.Join(root, "18", "bin"),
 		filepath.Join(root, "14", "bin"),
 		filepath.Join(root, "9", "bin"),
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("pgBinSearchPaths() = %v, want %v", got, want)
+		t.Fatalf("PgBinDirs() = %v, want %v", got, want)
 	}
 }
 
-func TestPgBinSearchPaths_MissingRoot(t *testing.T) {
-	old := pgLibRoot
-	pgLibRoot = filepath.Join(t.TempDir(), "absent")
-	t.Cleanup(func() { pgLibRoot = old })
-
-	if got := pgBinSearchPaths(); len(got) != 0 {
-		t.Fatalf("pgBinSearchPaths() = %v, want empty", got)
+func TestPgBinDirs_MissingRoot(t *testing.T) {
+	if got := testpg.PgBinDirs(filepath.Join(t.TempDir(), "absent")); len(got) != 0 {
+		t.Fatalf("PgBinDirs() = %v, want empty", got)
 	}
 }

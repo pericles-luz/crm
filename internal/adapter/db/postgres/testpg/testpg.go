@@ -47,12 +47,13 @@ var dbCounter atomic.Uint64
 // (/usr/lib/postgresql/<major>/bin). Discovered dynamically rather than
 // pinned to a version list: a hard-coded 16/15/14 list broke every pg_ctl
 // suite when ubuntu-latest moved to 26.04 and shipped a newer major.
-var pgLibRoot = "/usr/lib/postgresql"
+const pgLibRoot = "/usr/lib/postgresql"
 
-// pgBinSearchPaths returns <pgLibRoot>/<major>/bin for every installed major
-// that contains pg_ctl, newest first.
-func pgBinSearchPaths() []string {
-	entries, err := os.ReadDir(pgLibRoot)
+// PgBinDirs returns <root>/<major>/bin for every numeric major under root
+// that contains pg_ctl, newest major first. Exported only so the parent
+// postgres_test package can exercise it against a temp dir.
+func PgBinDirs(root string) []string {
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
 	}
@@ -66,7 +67,7 @@ func pgBinSearchPaths() []string {
 		if err != nil || !e.IsDir() {
 			continue
 		}
-		dir := filepath.Join(pgLibRoot, e.Name(), "bin")
+		dir := filepath.Join(root, e.Name(), "bin")
 		if _, err := os.Stat(filepath.Join(dir, "pg_ctl")); err != nil {
 			continue
 		}
@@ -397,7 +398,7 @@ func findPgBinDir() (string, error) {
 	if path, err := exec.LookPath("pg_ctl"); err == nil {
 		return filepath.Dir(path), nil
 	}
-	if paths := pgBinSearchPaths(); len(paths) > 0 {
+	if paths := PgBinDirs(pgLibRoot); len(paths) > 0 {
 		return paths[0], nil
 	}
 	return "", errors.New("testpg: pg_ctl not found; install postgresql-client or set PG_BIN")
