@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,12 +43,41 @@ var runtimePassword = "test_" + randHex(16)
 // requiring tests to coordinate.
 var dbCounter atomic.Uint64
 
-// pgBinSearchPaths lists the well-known locations where Debian/Ubuntu install
-// pg_ctl, in version-descending order. PATH is consulted first.
-var pgBinSearchPaths = []string{
-	"/usr/lib/postgresql/16/bin",
-	"/usr/lib/postgresql/15/bin",
-	"/usr/lib/postgresql/14/bin",
+// pgLibRoot is where Debian/Ubuntu install versioned PostgreSQL binaries
+// (/usr/lib/postgresql/<major>/bin). Discovered dynamically rather than
+// pinned to a version list: a hard-coded 16/15/14 list broke every pg_ctl
+// suite when ubuntu-latest moved to 26.04 and shipped a newer major.
+var pgLibRoot = "/usr/lib/postgresql"
+
+// pgBinSearchPaths returns <pgLibRoot>/<major>/bin for every installed major
+// that contains pg_ctl, newest first.
+func pgBinSearchPaths() []string {
+	entries, err := os.ReadDir(pgLibRoot)
+	if err != nil {
+		return nil
+	}
+	type cand struct {
+		major int
+		dir   string
+	}
+	var cands []cand
+	for _, e := range entries {
+		major, err := strconv.Atoi(e.Name())
+		if err != nil || !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(pgLibRoot, e.Name(), "bin")
+		if _, err := os.Stat(filepath.Join(dir, "pg_ctl")); err != nil {
+			continue
+		}
+		cands = append(cands, cand{major, dir})
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].major > cands[j].major })
+	out := make([]string, len(cands))
+	for i, c := range cands {
+		out[i] = c.dir
+	}
+	return out
 }
 
 // Harness is the live test-postgres environment. It is safe to share across
@@ -366,10 +397,8 @@ func findPgBinDir() (string, error) {
 	if path, err := exec.LookPath("pg_ctl"); err == nil {
 		return filepath.Dir(path), nil
 	}
-	for _, p := range pgBinSearchPaths {
-		if _, err := os.Stat(filepath.Join(p, "pg_ctl")); err == nil {
-			return p, nil
-		}
+	if paths := pgBinSearchPaths(); len(paths) > 0 {
+		return paths[0], nil
 	}
 	return "", errors.New("testpg: pg_ctl not found; install postgresql-client or set PG_BIN")
 }
