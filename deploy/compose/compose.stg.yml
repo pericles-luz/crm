@@ -112,12 +112,18 @@ services:
   # app's media path goes live. The script is idempotent — re-runs
   # on every deploy are no-ops once the resources exist.
   minio-init:
-    # [SIN-66605] Pin the mc client to a release contemporaneous with the
-    # server pin above (RELEASE.2024-10-13). Floating `mc:latest` drifted to
-    # the 2025-09 build, whose admin API broke `mc admin policy` against the
-    # pinned 2024-10 server → minio-init exit 1, blocking cd-stg. Client must
-    # be <= server; 2024-10-08 is the release just before the server's.
-    image: minio/mc:RELEASE.2024-10-08T09-37-26Z@sha256:c0d345a438dcac5677c1158e4ac46637069b67b3cc38e7b04c08cf93bdee4a62
+    # [SIN-66605] The mc client must be <= the pinned 2024-10 server: a
+    # floating `mc:latest` drifted to the 2025-09 build, whose admin API broke
+    # `mc admin policy` → minio-init exit 1, blocking cd-stg.
+    #
+    # The `minio/mc` Docker Hub repository no longer exists (404), so any
+    # `minio/mc:*` ref fails `compose pull` with "pull access denied". Reuse
+    # the server image instead: it bundles /usr/bin/mc at
+    # RELEASE.2024-10-08T09-37-26Z (exactly the client we pinned before) plus
+    # /usr/bin/sh, and it is already pulled for the `minio` service, so this
+    # adds no new registry dependency. Keep this digest in lockstep with the
+    # `minio` service above.
+    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
     networks: [crm]
     restart: "no"
     depends_on:
