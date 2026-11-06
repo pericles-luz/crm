@@ -102,7 +102,9 @@ services:
   # script is idempotent — mc admin policy create / mc mb skip on present
   # resources.
   minio-init:
-    image: minio/mc:latest
+    # The server image bundles /usr/bin/mc; `minio/mc` is gone from Docker
+    # Hub. Same image as `minio` keeps client and server versions matched.
+    image: quay.io/minio/minio:latest
     networks: [crm]
     restart: "no"
     depends_on:
