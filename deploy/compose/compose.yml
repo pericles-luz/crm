@@ -81,7 +81,7 @@ services:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
 
   minio:
-    image: quay.io/minio/minio:latest
+    image: ghcr.io/pericles-luz/minio:RELEASE.2024-10-13T13-34-11Z@sha256:40aedd240d410e335941e74dee2c11d64b84c3e131d4db835ad71ad192655232
     restart: unless-stopped
     networks: [crm]
     command: ["server", "/data", "--console-address", ":9001"]
@@ -104,7 +104,7 @@ services:
   minio-init:
     # The server image bundles /usr/bin/mc; `minio/mc` is gone from Docker
     # Hub. Same image as `minio` keeps client and server versions matched.
-    image: quay.io/minio/minio:latest
+    image: ghcr.io/pericles-luz/minio:RELEASE.2024-10-13T13-34-11Z@sha256:40aedd240d410e335941e74dee2c11d64b84c3e131d4db835ad71ad192655232
     networks: [crm]
     restart: "no"
     depends_on:

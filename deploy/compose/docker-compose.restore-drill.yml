@@ -49,7 +49,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm} -d ${POSTGRES_DB:-crm}"]
 
   minio:
-    image: quay.io/minio/minio:latest
+    image: ghcr.io/pericles-luz/minio:RELEASE.2024-10-13T13-34-11Z@sha256:40aedd240d410e335941e74dee2c11d64b84c3e131d4db835ad71ad192655232
     restart: "no"
     networks: [drill]
     command: ["server", "/data", "--console-address", ":9001"]

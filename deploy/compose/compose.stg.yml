@@ -92,7 +92,17 @@ services:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
+    # MinIO stopped publishing public images: minio/* on Docker Hub is gone
+    # (404) and quay.io/minio/* now answers 401. This is a layer-identical
+    # mirror of the previously pinned
+    #   quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594a…
+    # (linux/amd64; the digest differs only because the mirror is a
+    # single-platform manifest instead of the upstream multi-arch index),
+    # exported from the staging VPS cache and pushed to a public GHCR
+    # package. MinIO is AGPLv3, so redistributing the unmodified image is
+    # permitted. It receives no upstream security updates: replacing MinIO
+    # is a separate decision.
+    image: ghcr.io/pericles-luz/minio:RELEASE.2024-10-13T13-34-11Z@sha256:40aedd240d410e335941e74dee2c11d64b84c3e131d4db835ad71ad192655232
     restart: unless-stopped
     networks: [crm]
     command: ["server", "/data", "--console-address", ":9001"]
@@ -118,12 +128,12 @@ services:
     #
     # The `minio/mc` Docker Hub repository no longer exists (404), so any
     # `minio/mc:*` ref fails `compose pull` with "pull access denied". Reuse
-    # the server image instead: it bundles /usr/bin/mc at
+    # the (GHCR-mirrored) server image instead: it bundles /usr/bin/mc at
     # RELEASE.2024-10-08T09-37-26Z (exactly the client we pinned before) plus
     # /usr/bin/sh, and it is already pulled for the `minio` service, so this
     # adds no new registry dependency. Keep this digest in lockstep with the
     # `minio` service above.
-    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
+    image: ghcr.io/pericles-luz/minio:RELEASE.2024-10-13T13-34-11Z@sha256:40aedd240d410e335941e74dee2c11d64b84c3e131d4db835ad71ad192655232
     networks: [crm]
     restart: "no"
     depends_on:
